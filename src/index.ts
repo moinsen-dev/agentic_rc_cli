@@ -53,9 +53,13 @@ import {
   flutterWaitForWidgetHandler,
   flutterWaitForWidgetInputSchema,
 } from "./tools/flutter/wait_for_widget.js";
+import {
+  flutterEnterTextHandler,
+  flutterEnterTextInputSchema,
+} from "./tools/flutter/enter_text.js";
 
 const SERVER_NAME = "agentic-rc";
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.5.0";
 
 export function buildServer(): McpServer {
   const server = new McpServer(
@@ -309,6 +313,17 @@ export function buildServer(): McpServer {
       inputSchema: flutterWaitForWidgetInputSchema,
     },
     flutterWaitForWidgetHandler,
+  );
+
+  server.registerTool(
+    "rc_flutter_enter_text",
+    {
+      title: "Type text into a Flutter TextField / TextFormField",
+      description:
+        "Mutates the underlying TextEditingController so the field re-renders with the new content (onChanged fires, validators run, listeners notify). Walks down to the EditableText descendant so it works whether the caller passed a controller or not. Modes: 'replace' (default) overwrites; 'append' concatenates; 'clear' empties. This is the must-have for any login / form / search flow — without it the agent can't get past the auth gate.",
+      inputSchema: flutterEnterTextInputSchema,
+    },
+    flutterEnterTextHandler,
   );
 
   return server;

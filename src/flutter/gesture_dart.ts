@@ -171,6 +171,94 @@ return "yes:\${found!.widget.runtimeType.toString()}";
 })()`);
 }
 
+export type EnterTextMode = "replace" | "append" | "clear";
+
+/**
+ * Encodes a string as a valid Dart string literal. Escapes:
+ *   - backslashes
+ *   - single quotes (we wrap with ')
+ *   - newlines / carriage returns
+ *   - dollar signs (would otherwise trigger interpolation)
+ */
+function dartString(value: string): string {
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\$/g, "\\$")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
+  return `'${escaped}'`;
+}
+
+/**
+ * Build a Dart expression that fills a text field by mutating the
+ * underlying TextEditingController. Works for TextField, TextFormField,
+ * and direct EditableText matches — we always walk down to find an
+ * EditableText descendant, which guarantees a controller reference.
+ *
+ * Modes:
+ *   replace — controller.text = value     (default)
+ *   append  — controller.text = controller.text + value
+ *   clear   — controller.clear()  (value is ignored)
+ *
+ * Returns "set:<new-text>" on success, or a tagged failure.
+ */
+export function buildEnterTextExpression(
+  matcher: Exclude<WidgetMatcher, { x: number }>,
+  value: string,
+  mode: EnterTextMode,
+): string {
+  const literal = dartString(value);
+  let assignment: string;
+  switch (mode) {
+    case "append":
+      assignment = `c.text = c.text + ${literal};`;
+      break;
+    case "clear":
+      assignment = `c.clear();`;
+      break;
+    case "replace":
+    default:
+      assignment = `c.text = ${literal};`;
+      break;
+  }
+  return singleLine(`(() {
+${findElementSnippet(matcher)}
+Element? editable;
+if (found!.widget is EditableText) {
+  editable = found;
+} else {
+  void deepFind(Element e) {
+    if (editable != null) return;
+    if (e.widget is EditableText) { editable = e; return; }
+    e.visitChildren(deepFind);
+  }
+  found!.visitChildren(deepFind);
+}
+if (editable == null) return "no_editable_text:" + found!.widget.runtimeType.toString();
+final w = editable!.widget;
+if (w is! EditableText) return "not_editable_text";
+final c = w.controller;
+${assignment}
+return "set:\${c.text}";
+})()`);
+}
+
+export function parseEnterTextResult(raw: string | null): {
+  ok: boolean;
+  new_text?: string;
+  reason?: string;
+  widget_type?: string;
+} {
+  if (!raw) return { ok: false, reason: "empty" };
+  const set = raw.match(/^set:(.*)$/s);
+  if (set) return { ok: true, new_text: set[1] };
+  const noEd = raw.match(/^no_editable_text:(.+)$/);
+  if (noEd) return { ok: false, reason: "no_editable_text", widget_type: noEd[1] };
+  return { ok: false, reason: raw };
+}
+
 // ─── Result parsers ────────────────────────────────────────────────────
 
 export function parseTapResult(raw: string | null): {

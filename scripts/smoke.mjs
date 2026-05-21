@@ -125,12 +125,13 @@ async function main() {
     "rc_flutter_tap",
     "rc_flutter_widget_geometry",
     "rc_flutter_wait_for_widget",
+    "rc_flutter_enter_text",
   ].sort();
   assert(
     JSON.stringify(names) === JSON.stringify(expected),
     `tools mismatch — got ${JSON.stringify(names)}`,
   );
-  console.log("OK tools/list:", names.length, "tools (8 generic + 13 flutter)");
+  console.log("OK tools/list:", names.length, "tools (8 generic + 14 flutter)");
 
   // 3. rc_start /bin/sh -i
   const startResult = await send("tools/call", {

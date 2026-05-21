@@ -53,6 +53,7 @@ human-in-the-loop** when running interactive local programs.
 | `rc_flutter_tap` | **Tap a widget.** Identifies via `key`/`type`/`value_id` and calls the widget's `onPressed`/`onTap` closure directly (FAB, ElevatedButton, GestureDetector, InkWell, ListTile, …). Walks ancestors if the matched widget itself isn't tappable. |
 | `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` of the matched widget — useful for verifying layout or computing tap coordinates for nearby widgets. |
 | `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears with `appear:false`). Use after navigation, after tap, after hot-reload — any moment you'd otherwise sleep blindly. |
+| `rc_flutter_enter_text` | **Fill a TextField.** Walks to the underlying `EditableText` and mutates its `TextEditingController.text` (so `onChanged` fires, validators run, listeners notify). Modes: `replace` (default), `append`, `clear`. Without this, agents stall at every login / search / form. |
 
 ## The canonical Flutter agent loop
 
@@ -165,6 +166,61 @@ This loop is the verified pattern in
 [`scripts/flutter-tap-demo.mjs`](../../scripts/flutter-tap-demo.mjs):
 7 synthetic taps on the counter app's FAB, each verified by reading the
 counter Text's `data` property — 0 → 7 with no human and no GUI access.
+
+### Login / form flow — `rc_flutter_enter_text`
+
+The must-have for any auth-gated or form-driven app: fill TextFields, tap
+submit, verify the response. Verified end-to-end in
+[`scripts/flutter-login-demo.mjs`](../../scripts/flutter-login-demo.mjs).
+
+```text
+1. rc_flutter_wait_for_widget { by:"key", value:"login-button" }
+   → ensure the form is mounted (use after navigation / first frame).
+
+2. rc_flutter_enter_text { by:"key", value:"email-input",
+                           text:"user@example.com" }
+   → returns { success: true, new_text: "user@example.com",
+               eval_kind: "@Instance" }
+
+3. rc_flutter_enter_text { by:"key", value:"password-input",
+                           text:"s3cret!" }
+
+4. rc_flutter_tap { by:"key", value:"login-button" }
+   → onPressed fires.
+
+5. Poll for the result — wait for the status Text to change. The login form
+   is heavier than the counter (two TextFields rebuilding), so 150 ms
+   intervals up to ~3 s is realistic:
+
+   for (deadline = now + 3000; now < deadline; sleep 150) {
+     status = read_text_by_key("login-status")
+     if (status == "Welcome, …") break
+   }
+```
+
+Modes:
+
+- `replace` (default) — overwrites the field content.
+- `append` — concatenates onto the existing content. Useful for
+  typing-into-place tests or accumulating multi-char input.
+- `clear` — empties the field (equivalent to `controller.clear()`).
+  `text` is ignored.
+
+### Why enter_text mutates the controller (and not synthetic key events)
+
+Same reason as tap: `HardwareKeyboard.addHandler` and friends are blocked
+by the `@visibleForTesting` filter in eval. Mutating the
+`TextEditingController` directly is the public, supported way to set a
+TextField's contents — every Flutter app already does this in tests. The
+underlying `EditableText` listens to the controller, schedules a rebuild,
+and fires `onChanged` exactly as it would for keyboard input.
+
+Heads-up about pacing: `rc_flutter_enter_text` waits ~200 ms after the
+mutation to let the framework's rebuild settle before returning. Without
+this, back-to-back enter_text calls race the framework's build cycle and
+trigger "setState during build" assertions through the controller's
+notifyListeners path. The delay is internal — agents don't need to know
+about it.
 
 ### Why tap calls onPressed directly (and not synthetic pointer events)
 

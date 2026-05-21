@@ -6,7 +6,7 @@
 > structured tool calls. No human in the loop pressing `r`, copy-pasting log
 > excerpts, or reading the Dart VM Service URL off the terminal.
 
-[**18 MCP tools**](#tool-reference) · 33 unit tests · 5 live-driven demo scripts ·
+[**22 MCP tools**](#tool-reference) · 57 unit tests · 6 live-driven demo scripts ·
 Claude Code skill bundled.
 
 ---
@@ -142,10 +142,12 @@ interactive widget and **invokes its `onPressed` / `onTap` closure directly**
 | `rc_flutter_tap`             | Tap a widget by `key` / `type` / `value_id`. Calls the widget's onPressed/onTap closure (FAB, ElevatedButton, GestureDetector, InkWell, ListTile, …). Walks ancestors if the matched widget itself isn't tappable. |
 | `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` for a matched widget — useful for layout verification or computing positions of nearby widgets. |
 | `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears, with `appear:false`). Use after navigation, after tap, after hot-reload. |
+| `rc_flutter_enter_text`      | **Fill a TextField / TextFormField.** Walks to the underlying `EditableText`, mutates its `TextEditingController.text` (so `onChanged` fires, validators run, listeners notify). Modes: `replace` (default), `append`, `clear`. Must-have for any login / form / search-bar flow — without this the agent can't get past an auth gate. |
 
-The composition that makes this powerful: `rc_flutter_tap` to act,
-`rc_flutter_widget_find` + `rc_flutter_widget_properties` to **verify the
-state change**. End-to-end behavioural testing entirely through MCP. See
+The composition that makes this powerful: `rc_flutter_enter_text` to fill,
+`rc_flutter_tap` to submit, `rc_flutter_widget_find` +
+`rc_flutter_widget_properties` to **verify the state change**. End-to-end
+behavioural testing entirely through MCP. See
 [`scripts/flutter-tap-demo.mjs`](scripts/flutter-tap-demo.mjs) — 7
 synthetic taps on the counter app's FAB, each verified by re-reading the
 Text widget's `data` property (0 → 7).
@@ -334,6 +336,7 @@ node scripts/flutter-error-detect.mjs        # detect runtime exceptions via PTY
 node scripts/flutter-vm-agentic-loop.mjs     # full structured loop via VM service
 node scripts/flutter-inspector-demo.mjs      # widget-tree + find + properties
 node scripts/flutter-tap-demo.mjs            # 7 taps + assert counter 0 → 7
+node scripts/flutter-login-demo.mjs          # full login flow: enter email + pw, submit, verify
 ```
 
 ## What this is not (yet)

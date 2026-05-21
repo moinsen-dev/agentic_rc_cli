@@ -3,9 +3,11 @@ import {
   buildTapExpression,
   buildGeometryExpression,
   buildExistsExpression,
+  buildEnterTextExpression,
   parseTapResult,
   parseGeometryResult,
   parseExistsResult,
+  parseEnterTextResult,
 } from "../src/flutter/gesture_dart.js";
 
 describe("buildTapExpression", () => {
@@ -104,5 +106,75 @@ describe("parseExistsResult", () => {
     expect(parseExistsResult("yes:Center")).toEqual({ exists: true, type: "Center" });
     expect(parseExistsResult("no")).toEqual({ exists: false });
     expect(parseExistsResult("not_found")).toEqual({ exists: false });
+  });
+});
+
+describe("buildEnterTextExpression", () => {
+  it("default mode='replace' assigns controller.text", () => {
+    const expr = buildEnterTextExpression({ by: "key", value: "email" }, "foo@bar.com", "replace");
+    expect(expr).toContain("c.text = 'foo@bar.com'");
+    expect(expr).toContain("EditableText");
+    expect(expr).toContain("visitChildren");
+    // Same-line, no newlines (Dart eval rejects multi-line)
+    expect(expr.includes("\n")).toBe(false);
+  });
+
+  it("mode='append' concatenates", () => {
+    const expr = buildEnterTextExpression({ by: "type", value: "TextField" }, "bar", "append");
+    expect(expr).toContain("c.text = c.text + 'bar'");
+  });
+
+  it("mode='clear' calls controller.clear()", () => {
+    const expr = buildEnterTextExpression({ by: "key", value: "pwd" }, "ignored", "clear");
+    expect(expr).toContain("c.clear()");
+    expect(expr).not.toContain("'ignored'");
+  });
+
+  it("escapes single quotes, backslashes, $, newlines in the value", () => {
+    const tricky = "He's \\$\"100\" \n\tnext";
+    const expr = buildEnterTextExpression({ by: "key", value: "x" }, tricky, "replace");
+    // Single quote escaped
+    expect(expr).toContain("He\\'s");
+    // Backslash doubled
+    expect(expr).toContain("\\\\");
+    // $ escaped (would otherwise be interpolation)
+    expect(expr).toContain("\\$");
+    // No literal newline (we collapse + escape)
+    expect(expr.includes("\n")).toBe(false);
+    expect(expr).toContain("\\n");
+    expect(expr).toContain("\\t");
+  });
+
+  it("falls back to no_editable_text when matcher hits a non-input widget", () => {
+    const expr = buildEnterTextExpression({ by: "type", value: "Container" }, "x", "replace");
+    expect(expr).toContain("no_editable_text:");
+  });
+});
+
+describe("parseEnterTextResult", () => {
+  it("parses set:<value>", () => {
+    expect(parseEnterTextResult("set:hello")).toEqual({ ok: true, new_text: "hello" });
+  });
+  it("parses empty set (after clear)", () => {
+    expect(parseEnterTextResult("set:")).toEqual({ ok: true, new_text: "" });
+  });
+  it("multiline values come back intact (set:.* uses s-flag)", () => {
+    expect(parseEnterTextResult("set:line1\nline2")).toEqual({
+      ok: true,
+      new_text: "line1\nline2",
+    });
+  });
+  it("flags no_editable_text with the widget type", () => {
+    expect(parseEnterTextResult("no_editable_text:Container")).toEqual({
+      ok: false,
+      reason: "no_editable_text",
+      widget_type: "Container",
+    });
+  });
+  it("not_found falls through to reason", () => {
+    expect(parseEnterTextResult("not_found")).toEqual({ ok: false, reason: "not_found" });
+  });
+  it("null/empty", () => {
+    expect(parseEnterTextResult(null)).toEqual({ ok: false, reason: "empty" });
   });
 });
