@@ -73,6 +73,8 @@ const LOG_BUFFER_LIMIT = 500;
 
 export class FlutterService {
   private cachedMainIsolateId: string | null = null;
+  private cachedEvalLibraryId: string | null = null;
+  private cachedEvalLibraryUri: string | null = null;
   private errorBuffer: FlutterErrorEvent[] = [];
   private logBuffer: FlutterLogEvent[] = [];
   private unsubscribers: Array<() => void> = [];
@@ -204,6 +206,85 @@ export class FlutterService {
     return main.id;
   }
 
+  /**
+   * Pick the library to use as `targetId` for `evaluate(...)` calls.
+   *
+   * The naive default (isolate's rootLib) works for `flutter run` on
+   * macOS / iOS / Android — the rootLib is usually the user's main.dart
+   * which imports material.dart, so framework types like `Element`,
+   * `WidgetsBinding`, `FloatingActionButton` are all in scope.
+   *
+   * BUT Flutter Web sets the rootLib to a generated bootstrap
+   * (`web_entrypoint.dart`) that does NOT import the framework directly.
+   * The user's main.dart is only imported with a prefix, so framework
+   * type identifiers don't resolve from that scope. Eval comes back with
+   * RPC 113 "Expression compilation error" for every reference.
+   *
+   * We can't predict which library will work from outside, so we PROBE:
+   * for each candidate library, try compiling the bare identifier
+   * `Element`. First one that compiles wins. Cached for the session.
+   *
+   * Candidate order (most-likely-to-work first):
+   *   rootLib                          — works on macOS/iOS/Android desktop
+   *   package:flutter/material.dart    — works whenever a Material app
+   *   package:flutter/widgets.dart     — pure-Widgets apps
+   *   package:flutter/cupertino.dart   — Cupertino-only apps
+   *
+   * Compiles+caches in one round-trip on macOS, up to 4 on Web.
+   */
+  async evalTargetLibraryId(): Promise<string> {
+    if (this.cachedEvalLibraryId) return this.cachedEvalLibraryId;
+    const isolateId = await this.mainIsolateId();
+    const iso = (await this.client.call("getIsolate", { isolateId })) as IsolateResult & {
+      rootLib?: { id?: string };
+      libraries?: Array<{ id?: string; uri?: string }>;
+    };
+    const candidates: Array<{ id: string; uri: string }> = [];
+    if (iso.rootLib?.id) {
+      candidates.push({ id: iso.rootLib.id, uri: "<rootLib>" });
+    }
+    const wantedUris = [
+      "package:flutter/material.dart",
+      "package:flutter/widgets.dart",
+      "package:flutter/cupertino.dart",
+    ];
+    for (const uri of wantedUris) {
+      const lib = iso.libraries?.find((l) => l.uri === uri);
+      if (lib?.id) candidates.push({ id: lib.id, uri });
+    }
+    // Probe with `Element` — the lowest-common-denominator framework
+    // identifier that every gesture / inspector tool references. If
+    // Element resolves, all our other identifiers (Widget, WidgetsBinding,
+    // *Button, GestureDetector, …) resolve too because they live in the
+    // same library tree.
+    const probeErrors: string[] = [];
+    for (const cand of candidates) {
+      try {
+        await this.client.call("evaluate", {
+          isolateId,
+          targetId: cand.id,
+          expression: "Element",
+        });
+        this.cachedEvalLibraryId = cand.id;
+        this.cachedEvalLibraryUri = cand.uri;
+        return cand.id;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        probeErrors.push(`${cand.uri}: ${msg}`);
+      }
+    }
+    throw new Error(
+      `No library in the running isolate has \`Element\` in scope. Probed: ${candidates
+        .map((c) => c.uri)
+        .join(", ")}. Errors: ${probeErrors.join(" | ")}`,
+    );
+  }
+
+  /** Which library URI evaluate() is currently targeting — surface in diagnostics. */
+  get evalTargetLibraryUri(): string | null {
+    return this.cachedEvalLibraryUri;
+  }
+
   async hotReload(): Promise<{ success: boolean; notices: string[] }> {
     const isolateId = await this.mainIsolateId();
     const report = (await this.client.call("reloadSources", { isolateId, force: false })) as ReloadReportResult;
@@ -221,12 +302,17 @@ export class FlutterService {
     };
   }
 
-  /** Evaluate an expression in the main isolate's root library scope. */
-  async evaluate(expression: string): Promise<{ kind: string; valueAsString: string | null; raw: Record<string, unknown> }> {
+  /**
+   * Evaluate an expression. The targetId is `package:flutter/material.dart`
+   * by default (or widgets / cupertino / rootLib as fallback chain) so
+   * framework types resolve regardless of the host bootstrap library.
+   * See `evalTargetLibraryId()` for the rationale.
+   */
+  async evaluate(
+    expression: string,
+  ): Promise<{ kind: string; valueAsString: string | null; raw: Record<string, unknown> }> {
     const isolateId = await this.mainIsolateId();
-    const iso = (await this.client.call("getIsolate", { isolateId })) as IsolateResult & { rootLib?: { id?: string } };
-    const targetId = iso.rootLib?.id;
-    if (!targetId) throw new Error("Cannot find isolate rootLib");
+    const targetId = await this.evalTargetLibraryId();
     const result = (await this.client.call("evaluate", {
       isolateId,
       targetId,

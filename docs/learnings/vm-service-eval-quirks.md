@@ -70,6 +70,72 @@ reporter blows up on parsing the eval's anonymous stack frame.
 See [`framework-rebuild-pacing.md`](framework-rebuild-pacing.md) for the
 mitigation pattern.
 
+## Constraint 4 — Dart 3 record types are rejected
+
+Annotations like `({void Function() cb, String name})?` (Dart 3 named
+records) cause RPC 113 "Expression compilation error". The eval
+frontend is lagging Dart 3's syntax even on a Flutter 3.44 / Dart 3.12
+toolchain.
+
+**Workaround:** use plain `List<dynamic>` 2-tuples.
+
+```dart
+// Don't:
+({void Function() cb, String name})? checkTappable(Widget x) { … }
+
+// Do:
+List? checkTappable(Widget x) {                                  // [cb, name]
+  if (x is FloatingActionButton && x.onPressed != null) {
+    return [x.onPressed!, "FloatingActionButton.onPressed"];
+  }
+  // …
+  return null;
+}
+// Caller:
+final hit = checkTappable(w);
+if (hit != null) {
+  (hit[0] as void Function())();
+  print("called: " + hit[1].toString());
+}
+```
+
+`List` is `List<dynamic>` (always allowed); casting at the call site
+is mildly verbose but compiles. Discovered while building the
+descendant-first walker for v0.6.
+
+## Constraint 5 — root library may not import the framework
+
+Eval expressions compile in the scope of a target Library (the `targetId`
+parameter). The intuitive default — `isolate.rootLib` — works on macOS,
+iOS, Android desktop because Flutter's bootstrap there is the user's
+`main.dart`, which `import 'package:flutter/material.dart'`. So
+`Element`, `WidgetsBinding`, `FloatingActionButton` etc. all resolve.
+
+**Flutter Web is different.** The rootLib is a generated
+`web_entrypoint.dart`:
+
+```dart
+import 'main.dart' as entrypoint;
+void main() async {
+  await ui_web.bootstrapEngine();
+  entrypoint.main();
+}
+```
+
+No framework import in scope. Every eval that references `Element`
+fails with RPC 113.
+
+**Workaround:** in `FlutterService.evalTargetLibraryId()` we probe each
+candidate library with the bare identifier `Element`. Order:
+`rootLib` → `package:flutter/material.dart` → `widgets.dart` →
+`cupertino.dart`. The first library where `Element` compiles wins, and
+is cached for the session. macOS keeps using rootLib; Web transparently
+falls back to material.dart.
+
+The diagnostic surface exposes which library is currently active via
+`evalTargetLibraryUri` (visible in tool results via the future
+`eval_target_lib` field).
+
 ## Diagnostic technique
 
 `scripts/eval-debug.mjs` is the canonical bisection tool — when a new

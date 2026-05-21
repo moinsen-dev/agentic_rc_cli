@@ -1,11 +1,33 @@
 # STATE — agentic_rc_cli
 
-> **Frozen:** 2026-05-21 16:05 (Europe/Berlin)
+> **Frozen:** 2026-05-21 16:55 (Europe/Berlin)
 > **Branch:** develop
-> **Last commit:** `f859509` · docs: CLAUDE.md + STATE.md + 6 progressive-disclosure learning files
-> **Dirty:** uncommitted v0.6.0 hardening work — staging now
+> **Last commit:** `8ea1000` · feat: real-world hardening v0.6.0
+> **Dirty:** uncommitted v0.6.1 eval-target-library fix — staging now
 
 ## Last work-unit
+
+Shipped **v0.6.1** — the actual fundamental fix for Flutter Web that
+v0.6.0's diagnostic surfaced. Flutter Web's `rootLib` is a generated
+`web_entrypoint.dart` that doesn't import the framework → eval against
+it can't resolve `Element` / `WidgetsBinding` / `*Button`. Every
+gesture / inspector tool failed silently on Web (would have, before
+v0.6.0 diagnostic; failed loudly with `eval_kind:"@Error",
+eval_error:"RPC 113 Expression compilation error"` after).
+
+**Fix:** `FlutterService.evalTargetLibraryId()` probes each candidate
+library with the bare identifier `Element`. First one that compiles
+wins, cached for the session. Order: `rootLib` → `material.dart` →
+`widgets.dart` → `cupertino.dart`. macOS keeps using rootLib (1 probe
+call), Web transparently falls back to material.dart (2-4 probe
+calls).
+
+Captured the new constraint as Constraint #5 + #4 (Dart 3 records ban)
+in `docs/learnings/vm-service-eval-quirks.md`. 64/64 unit tests +
+tap-demo + login-demo all green on macOS — no regression. Ready for
+re-test against the user's Flutter Web app.
+
+Previous v0.6.0 changes also still in this commit chain:
 
 Shipped **v0.6.0** real-world hardening, based on a Flutter Web session
 where four blockers surfaced. Top-4 prio agreed with user, implemented:
