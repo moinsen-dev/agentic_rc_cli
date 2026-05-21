@@ -47,12 +47,12 @@ human-in-the-loop** when running interactive local programs.
 | `rc_flutter_hot_reload` | Programmatic hot reload via the VM service. Returns `{success, notices}`. No need to send `r` and grep for "Reloaded". |
 | `rc_flutter_eval` | Run arbitrary Dart in the root library scope of the main isolate. |
 | `rc_flutter_screenshot` | Captures a PNG via `ext.flutter.screenshot`. With `save_to`, writes to disk. Returns `{success:false, reason:"extension_not_registered"}` on macOS desktop — fall back to Peekaboo. |
-| `rc_flutter_widget_tree` | Fetch the live widget tree as JSON (summary). Each node carries `{valueId, description, type, key, source_location, children}`. Cache-aware; pass `refresh: true` after a hot-reload. |
-| `rc_flutter_widget_find` | Search the live tree by `key`, `type`, `description` substring, or `source_contains`. Returns matches with ancestry `path` and `valueId`. |
+| `rc_flutter_widget_tree` | Fetch the live widget tree as JSON. Each node: `{valueId, description, type, key, source_location, children}`. Cache-aware (`refresh:true` to bust). **Defaults to user-code-only**: framework subtrees collapse to `{_elided: true, framework_node_count: N}` markers — set `include_framework:true` for the full tree. `source_prefix:"/abs/path/lib"` for strict path filtering. `flat:true` returns a flat list with `path` strings instead of a nested tree (saves tokens dramatically). |
+| `rc_flutter_widget_find` | Search the live tree by `key`, `type`, `description` substring, or `source_contains`. Returns matches with ancestry `path` and `valueId`. **Note:** the inspector cache drops Key info on Text leaves — see [`docs/learnings/inspector-tree-keys.md`](../../docs/learnings/inspector-tree-keys.md) for the direct-eval workaround. |
 | `rc_flutter_widget_properties` | Read a widget's diagnostic properties (text content, padding, callbacks, colours, …) by its `valueId` from `_find` / `_tree`. |
-| `rc_flutter_tap` | **Tap a widget.** Identifies via `key`/`type`/`value_id` and calls the widget's `onPressed`/`onTap` closure directly (FAB, ElevatedButton, GestureDetector, InkWell, ListTile, …). Walks ancestors if the matched widget itself isn't tappable. |
-| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` of the matched widget — useful for verifying layout or computing tap coordinates for nearby widgets. |
-| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears with `appear:false`). Use after navigation, after tap, after hot-reload — any moment you'd otherwise sleep blindly. |
+| `rc_flutter_tap` | **Tap a widget.** Identifies via `key`/`type`/**`text`**/`value_id`/`coordinate`. Walker default: **self → descendants → ancestors** (so `by:'type', value:'TPKButton'` works for custom wrappers around built-in buttons). Returns `reason:"ambiguous_descendants"` + `ambiguous_targets:[{type, callback}…]` when the subtree contains multiple tappables — pick one with `by:'key'` / `by:'value_id'`. Set `descend:false` to restrict to self → ancestors (pre-v0.6 behaviour). |
+| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` of the matched widget — useful for verifying layout. Supports `by:'text'`. |
+| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears with `appear:false`). Supports `by:'text'`. Use after navigation, after tap, after hot-reload — any moment you'd otherwise sleep blindly. **Surfaces eval errors immediately** rather than polling silently. |
 | `rc_flutter_enter_text` | **Fill a TextField.** Walks to the underlying `EditableText` and mutates its `TextEditingController.text` (so `onChanged` fires, validators run, listeners notify). Modes: `replace` (default), `append`, `clear`. Without this, agents stall at every login / search / form. |
 
 ## The canonical Flutter agent loop
@@ -132,6 +132,75 @@ Key search modes for `rc_flutter_widget_find`:
   description (good when you don't know the exact class).
 - `by: "source_contains"` — match anywhere in the `file:line:col` source
   location string. Use this to find "the widget defined around lib/foo.dart:42".
+
+### Matchers on gesture tools (rc_flutter_tap, _geometry, _wait_for_widget)
+
+The gesture tools share a slightly larger matcher set than the inspector:
+
+- `by: "key"` / `by: "type"` / `by: "value_id"` — same as inspector.
+- **`by: "text"`** — match a Text widget whose `data` field contains the
+  value (case-insensitive substring). Pairs naturally with the
+  descendant-first walker: `rc_flutter_tap by:'text' value:'Sign In'`
+  finds the inner `Text("Sign In")`, then the ancestor walk picks up
+  the wrapping button. **Caveat:** if multiple buttons share the same
+  label text (e.g. two "Save" buttons), you get the first one — fall
+  back to `by: "key"` for precision.
+- `by: "coordinate"` (tap only) — returns
+  `coordinate_tap_unsupported`. Kept as a documented limitation: the
+  `@visibleForTesting` ban on `handlePointerEvent` makes coordinate-based
+  taps impossible from eval.
+
+### Tap walker (self → descendants → ancestors)
+
+Real-world apps wrap built-in tappables in custom widgets (`TPKButton`
+wraps `TextButton`, `BrandedCard` wraps `InkWell`, …). The tap walker
+default is:
+
+1. **Self** — is the matched widget itself a known tappable? Use it.
+2. **Descendants** — depth-first scan the matched widget's subtree for
+   the next tappable. **Stops descending into found tappables**, so
+   nested ones don't conflict.
+3. **Ancestors** — walk up via `visitAncestorElements` until a tappable
+   is found.
+
+If descendant scan finds **more than one** tappable, the tool returns
+`reason: "ambiguous_descendants"` with `ambiguous_targets:[{type, callback}…]`
+so you know to disambiguate via `by:"key"` or `by:"value_id"` instead.
+
+Set `descend: false` to restrict to self → ancestors (the pre-v0.6
+behaviour) — useful if you matched a parent intentionally and don't
+want descendant-walk to pick a child.
+
+### widget_tree filter & flat mode
+
+A real Flutter app's tree has 200-500 nodes. Most are framework wrappers
+(`_PipelineOwnerScope`, `RawView`, `Semantics`, …) with source locations
+pointing to `package:flutter/`. Returning all of them blows past the
+tool-result token budget — empirically 86 KB → 200 KB on a normal app.
+
+Defaults from v0.6 onwards:
+
+- `include_framework: false` — framework subtrees collapse to
+  `{_elided: true, framework_node_count: N, description: "<wrapper-name>"}`.
+  The user's widgets ALWAYS show; only the wrappers around them elide.
+- Override with `include_framework: true` if you're debugging Flutter
+  internals.
+
+For tighter scoping, pass `source_prefix` with an absolute path:
+
+```jsonc
+rc_flutter_widget_tree {
+  session_id: "…",
+  source_prefix: "/Users/me/proj/lib",   // strict — only widgets defined here
+  flat: true                              // list instead of tree
+}
+```
+
+`flat: true` returns `{count, widgets:[{valueId, type, key, source_location, path}…]}`
+instead of a nested tree. Saves ~70% tokens by dropping the children
+arrays. Combine with `source_prefix` and the result is "every widget
+defined in user code, with its ancestry path" — the most useful first
+view of a new screen.
 
 ## Agentic interaction loop — tap and verify behaviour
 

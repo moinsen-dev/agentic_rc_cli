@@ -59,7 +59,7 @@ import {
 } from "./tools/flutter/enter_text.js";
 
 const SERVER_NAME = "agentic-rc";
-const SERVER_VERSION = "0.5.0";
+const SERVER_VERSION = "0.6.0";
 
 export function buildServer(): McpServer {
   const server = new McpServer(

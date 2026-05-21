@@ -28,8 +28,27 @@
 export type WidgetMatcher =
   | { by: "key"; value: string }
   | { by: "type"; value: string }
+  | { by: "text"; value: string }
   | { by: "value_id"; value: string }
   | { x: number; y: number };
+
+/**
+ * Encodes a string as a valid Dart single-quoted string literal. Escapes:
+ *   - backslashes
+ *   - single quotes
+ *   - newlines / CR / tab
+ *   - dollar signs (would otherwise trigger string interpolation)
+ */
+function dartString(value: string): string {
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\$/g, "\\$")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
+  return `'${escaped}'`;
+}
 
 /**
  * Lookup snippet that defines `Element? found` and either populates it
@@ -47,7 +66,7 @@ if (found == null) return "not_found";
   }
 
   if (matcher.by === "key") {
-    const v = JSON.stringify(matcher.value);
+    const v = dartString(matcher.value);
     return `
 Element? found;
 void visit(Element e) {
@@ -65,8 +84,31 @@ if (found == null) return "not_found";
 `;
   }
 
+  if (matcher.by === "text") {
+    // Match a Text widget whose `data` (or toString()) contains the value,
+    // case-insensitive. Pairs with the descendant-first walker so that
+    // by="text" value="Sign In" finds the wrapping button when we then
+    // search for a tappable in self/descendants/ancestors.
+    const v = dartString(matcher.value.toLowerCase());
+    return `
+Element? found;
+final needle = ${v};
+void visit(Element e) {
+  if (found != null) return;
+  final w = e.widget;
+  if (w is Text) {
+    final d = w.data;
+    if (d != null && d.toLowerCase().contains(needle)) { found = e; return; }
+  }
+  e.visitChildren(visit);
+}
+WidgetsBinding.instance.rootElement?.visitChildren(visit);
+if (found == null) return "not_found";
+`;
+  }
+
   // by === "type"
-  const t = JSON.stringify(matcher.value);
+  const t = dartString(matcher.value);
   return `
 Element? found;
 void visit(Element e) {
@@ -80,74 +122,124 @@ if (found == null) return "not_found";
 }
 
 /**
- * Snippet that, starting from `found` (an Element with a Widget), looks
- * for a tappable callback on the widget itself OR any ancestor widget.
- * Sets `cb` (Function?) and `cbName` (String?).
+ * Predicate snippet that resolves whether a Widget is tappable, returning
+ * a (cb, name) record or null. Used by self/descendants/ancestors phases
+ * of the walker — DRY across all three.
+ *
+ * Custom widgets (TPKButton etc.) are NOT in this list — they wrap a
+ * built-in tappable (TextButton, GestureDetector, …) which the
+ * descendant phase reaches.
  */
-const TAPPABLE_SCAN = `
-void Function()? cb;
-String? cbName;
-void tryWidget(Widget x) {
-  if (cb != null) return;
-  if (x is FloatingActionButton && x.onPressed != null) { cb = x.onPressed; cbName = "FloatingActionButton.onPressed"; }
-  else if (x is ElevatedButton && x.onPressed != null)  { cb = x.onPressed; cbName = "ElevatedButton.onPressed"; }
-  else if (x is TextButton && x.onPressed != null)      { cb = x.onPressed; cbName = "TextButton.onPressed"; }
-  else if (x is OutlinedButton && x.onPressed != null)  { cb = x.onPressed; cbName = "OutlinedButton.onPressed"; }
-  else if (x is FilledButton && x.onPressed != null)    { cb = x.onPressed; cbName = "FilledButton.onPressed"; }
-  else if (x is IconButton && x.onPressed != null)      { cb = x.onPressed; cbName = "IconButton.onPressed"; }
-  else if (x is GestureDetector && x.onTap != null)     { cb = x.onTap; cbName = "GestureDetector.onTap"; }
-  else if (x is InkWell && x.onTap != null)             { cb = x.onTap; cbName = "InkWell.onTap"; }
-  else if (x is InkResponse && x.onTap != null)         { cb = x.onTap; cbName = "InkResponse.onTap"; }
-  else if (x is ListTile && x.onTap != null)            { cb = x.onTap; cbName = "ListTile.onTap"; }
+// We return a 2-element List<dynamic> instead of a Dart-3 record because
+// the VM-service eval frontend rejects record type annotations
+// ({void Function() cb, String name}) with RPC 113. List<dynamic> is
+// older Dart but compiles fine.
+//
+//   List? checkTappable(Widget x) → [VoidCallback, String] | null
+//                                      [0]=callback     [1]=name
+const CHECK_TAPPABLE = `
+List? checkTappable(Widget x) {
+  if (x is FloatingActionButton && x.onPressed != null) return [x.onPressed!, "FloatingActionButton.onPressed"];
+  if (x is ElevatedButton && x.onPressed != null) return [x.onPressed!, "ElevatedButton.onPressed"];
+  if (x is TextButton && x.onPressed != null) return [x.onPressed!, "TextButton.onPressed"];
+  if (x is OutlinedButton && x.onPressed != null) return [x.onPressed!, "OutlinedButton.onPressed"];
+  if (x is FilledButton && x.onPressed != null) return [x.onPressed!, "FilledButton.onPressed"];
+  if (x is IconButton && x.onPressed != null) return [x.onPressed!, "IconButton.onPressed"];
+  if (x is GestureDetector && x.onTap != null) return [x.onTap!, "GestureDetector.onTap"];
+  if (x is InkWell && x.onTap != null) return [x.onTap!, "InkWell.onTap"];
+  if (x is InkResponse && x.onTap != null) return [x.onTap!, "InkResponse.onTap"];
+  if (x is ListTile && x.onTap != null) return [x.onTap!, "ListTile.onTap"];
+  return null;
 }
-tryWidget(found!.widget);
-if (cb == null) {
-  found!.visitAncestorElements((el) {
-    tryWidget(el.widget);
-    return cb == null;
-  });
-}
-if (cb == null) return "no_callback_found:" + found!.widget.runtimeType.toString();
-cb!.call();
 `;
 
 /**
- * Build a tap expression. For widget-matcher modes, it calls the nearest
- * `onPressed`/`onTap` on the found widget or any ancestor. For coordinate
- * mode it currently no-ops with a tagged result (true coord-based tap
- * would need handlePointerEvent which is blocked — workaround: identify
- * the widget by type/key and use that instead).
+ * Walker snippet: tries self → descendants → ancestors (if descend) or
+ * self → ancestors (if !descend).
+ *
+ * Why self → descendants → ancestors as default? Real-world apps wrap
+ * built-in tappables in custom widgets (TPKButton wraps TextButton).
+ * by="type":"TPKButton" hits the wrapper; the tappable is INSIDE.
+ * Ancestor-only walk would miss it and report no_callback_found.
+ *
+ * On ambiguity (multiple tappable descendants found in the subtree),
+ * we return "ambiguous:<list>" so the caller can disambiguate via
+ * by:"key" / by:"value_id" instead of guessing.
  */
+function tappableScan(descend: boolean): string {
+  // Each `hit` is List? of [cb, name].
+  // Each `cand` collected during descend is List<dynamic> of [cb, name, type].
+  const descendBlock = descend
+    ? `
+if (hit == null) {
+  final cands = <List>[];
+  void scan(Element e) {
+    final h = checkTappable(e.widget);
+    if (h != null) {
+      cands.add([h[0], h[1], e.widget.runtimeType.toString()]);
+      return;
+    }
+    e.visitChildren(scan);
+  }
+  found!.visitChildren(scan);
+  if (cands.length == 1) {
+    hit = [cands[0][0], cands[0][1]];
+  } else if (cands.length > 1) {
+    final list = cands.map((c) => c[2].toString() + ":" + c[1].toString()).join("|");
+    return "ambiguous:" + list;
+  }
+}
+`
+    : "";
+  return `
+${CHECK_TAPPABLE}
+List? hit = checkTappable(found!.widget);
+${descendBlock}
+if (hit == null) {
+  found!.visitAncestorElements((el) {
+    final h = checkTappable(el.widget);
+    if (h != null) { hit = h; return false; }
+    return true;
+  });
+}
+if (hit == null) return "no_callback_found:" + found!.widget.runtimeType.toString();
+(hit![0] as void Function())();
+return "called:" + hit![1].toString();
+`;
+}
+
 /**
  * Collapse all internal whitespace runs to single spaces. The Dart VM
  * service's `evaluate` RPC rejects multi-line expressions outright
  * (RPC 113 Expression compilation error) — found empirically via
- * scripts/eval-debug.mjs phase 4. We keep the template multi-line for
- * readability and squash before sending.
+ * scripts/eval-debug.mjs phase 4.
  */
 function singleLine(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
-export function buildTapExpression(matcher: WidgetMatcher): string {
+export interface TapOptions {
+  /** Whether to look for tappables in descendants of the matched widget.
+   *  Default: true. Set false to restrict to self → ancestors only. */
+  descend?: boolean;
+}
+
+export function buildTapExpression(matcher: WidgetMatcher, opts: TapOptions = {}): string {
   if ("x" in matcher) {
     return singleLine(`(() {
-      return "coordinate_tap_unsupported:Dart eval forbids handlePointerEvent — use by=key|type|value_id instead";
+      return "coordinate_tap_unsupported:Dart eval forbids handlePointerEvent — use by=key|type|text|value_id instead";
     })()`);
   }
+  const descend = opts.descend ?? true;
   return singleLine(`(() {
 ${findElementSnippet(matcher)}
-${TAPPABLE_SCAN}
-return "called:" + cbName!;
+${tappableScan(descend)}
 })()`);
 }
 
 /**
- * Geometry without referencing `RenderBox.localToGlobal` directly through
- * `@visibleForTesting`-marked paths. RenderBox is fine to *touch*; we
- * just have to be careful not to invoke any test-only methods.
- *
- * Returns "geom:<x>,<y>,<w>,<h>:<type>" or a tagged failure.
+ * Geometry: returns rect + type of the matched widget.
+ * "geom:<x>,<y>,<w>,<h>:<type>" or "no_render_box" or "not_found".
  */
 export function buildGeometryExpression(matcher: Exclude<WidgetMatcher, { x: number }>): string {
   return singleLine(`(() {
@@ -162,7 +254,7 @@ return "geom:\${p.dx.toStringAsFixed(1)},\${p.dy.toStringAsFixed(1)},\${s.width.
 }
 
 /**
- * Existence probe. Returns "yes:<type>" or "no"/"not_found".
+ * Existence probe. Returns "yes:<type>" or "not_found".
  */
 export function buildExistsExpression(matcher: Exclude<WidgetMatcher, { x: number }>): string {
   return singleLine(`(() {
@@ -174,33 +266,9 @@ return "yes:\${found!.widget.runtimeType.toString()}";
 export type EnterTextMode = "replace" | "append" | "clear";
 
 /**
- * Encodes a string as a valid Dart string literal. Escapes:
- *   - backslashes
- *   - single quotes (we wrap with ')
- *   - newlines / carriage returns
- *   - dollar signs (would otherwise trigger interpolation)
- */
-function dartString(value: string): string {
-  const escaped = value
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/\$/g, "\\$")
-    .replace(/\r/g, "\\r")
-    .replace(/\n/g, "\\n")
-    .replace(/\t/g, "\\t");
-  return `'${escaped}'`;
-}
-
-/**
  * Build a Dart expression that fills a text field by mutating the
- * underlying TextEditingController. Works for TextField, TextFormField,
- * and direct EditableText matches — we always walk down to find an
- * EditableText descendant, which guarantees a controller reference.
- *
- * Modes:
- *   replace — controller.text = value     (default)
- *   append  — controller.text = controller.text + value
- *   clear   — controller.clear()  (value is ignored)
+ * underlying TextEditingController. Walks down to the EditableText
+ * descendant so it works whether the user passed a controller or not.
  *
  * Returns "set:<new-text>" on success, or a tagged failure.
  */
@@ -245,6 +313,8 @@ return "set:\${c.text}";
 })()`);
 }
 
+// ─── Result parsers ────────────────────────────────────────────────────
+
 export function parseEnterTextResult(raw: string | null): {
   ok: boolean;
   new_text?: string;
@@ -259,21 +329,32 @@ export function parseEnterTextResult(raw: string | null): {
   return { ok: false, reason: raw };
 }
 
-// ─── Result parsers ────────────────────────────────────────────────────
+export interface TapAmbiguousTarget {
+  type: string;
+  callback: string;
+}
 
 export function parseTapResult(raw: string | null): {
   ok: boolean;
   callback?: string;
   widget_type?: string;
   reason?: string;
+  ambiguous?: TapAmbiguousTarget[];
 } {
   if (!raw) return { ok: false, reason: "empty" };
   const called = raw.match(/^called:(.+)$/);
-  if (called) {
-    return { ok: true, callback: called[1] };
-  }
+  if (called) return { ok: true, callback: called[1] };
   const noCb = raw.match(/^no_callback_found:(.+)$/);
   if (noCb) return { ok: false, reason: "no_callback_found", widget_type: noCb[1] };
+  const ambig = raw.match(/^ambiguous:(.+)$/);
+  if (ambig) {
+    const targets = ambig[1].split("|").map((s) => {
+      const idx = s.indexOf(":");
+      if (idx < 0) return { type: s, callback: "?" };
+      return { type: s.slice(0, idx), callback: s.slice(idx + 1) };
+    });
+    return { ok: false, reason: "ambiguous_descendants", ambiguous: targets };
+  }
   const coord = raw.match(/^coordinate_tap_unsupported:(.+)$/);
   if (coord) return { ok: false, reason: "coordinate_tap_unsupported" };
   return { ok: false, reason: raw };

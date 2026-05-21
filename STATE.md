@@ -1,88 +1,105 @@
 # STATE — agentic_rc_cli
 
-> **Frozen:** 2026-05-21 14:45 (Europe/Berlin)
+> **Frozen:** 2026-05-21 16:05 (Europe/Berlin)
 > **Branch:** develop
-> **Last commit:** `2b26f16` · feat(flutter): text input — fill TextField via controller mutation (v0.5.0)
-> **Dirty:** clean (or trivially — see git status)
+> **Last commit:** `f859509` · docs: CLAUDE.md + STATE.md + 6 progressive-disclosure learning files
+> **Dirty:** uncommitted v0.6.0 hardening work — staging now
 
 ## Last work-unit
 
-Shipped **v0.5.0**: agentic text input via `rc_flutter_enter_text` —
-walks to the EditableText descendant and mutates its
-`TextEditingController`. Verified end-to-end with
-[`scripts/flutter-login-demo.mjs`](scripts/flutter-login-demo.mjs) which
-fills email + password, taps submit, and asserts the status text
-("Welcome, …" → clear pw → "Invalid credentials" → append mode test).
-Two non-obvious findings landed as docs/learnings entries during this:
-back-to-back eval-driven mutations race the framework's mid-frame
-rebuild (200 ms server-side settle in `enter_text.ts`), and the inspector
-summary tree drops Key info on Text leaves (use direct Dart eval when
-key-matching for reliability).
+Shipped **v0.6.0** real-world hardening, based on a Flutter Web session
+where four blockers surfaced. Top-4 prio agreed with user, implemented:
 
-22 MCP tools total now (8 PTY + 14 Flutter). 57/57 unit tests pass. Six
-live-driven demo scripts all green.
+1. **Universal eval diagnostic** — new shared `safeEval` helper in
+   [`src/tools/flutter/_eval_diagnostic.ts`](src/tools/flutter/_eval_diagnostic.ts).
+   Every tool that calls `svc.evaluate(...)` now surfaces
+   `eval_ok` / `eval_kind` / `eval_error` / `expression_preview` instead
+   of the v0.5 opaque `reason: "empty", raw_eval: null`. Migrated tap,
+   widget_geometry, wait_for_widget; enter_text already had its own
+   diagnostic. Convention captured in
+   [`docs/learnings/eval-diagnostic-discipline.md`](docs/learnings/eval-diagnostic-discipline.md).
+2. **Tap walker: self → descendants → ancestors** (default; opt-out
+   `descend:false`). Real apps wrap built-ins in custom widgets
+   (`TPKButton` → `TextButton`); old walker missed them. Multiple
+   descendants → `reason:"ambiguous_descendants"` + structured target
+   list so the agent can disambiguate via `by:"key"` instead of
+   guessing.
+3. **`by: "text"` matcher** on tap/geometry/wait_for_widget. Match a
+   `Text` widget whose `data` contains the value (case-insensitive
+   substring). Pairs with the descendant-first walker: `by:"text",
+   value:"Sign In"` finds the wrapping button via ancestor walk.
+4. **widget_tree filtering & flat mode**. Default
+   `include_framework:false` — framework subtrees collapse to
+   `{_elided:true, framework_node_count:N}` markers (kills the 200 KB
+   tree explosion). `source_prefix:"…"` for strict path filter.
+   `flat:true` returns a flat list with `path` strings instead of a
+   nested tree (~70% token saving combined with source_prefix).
+
+One bug rediscovered: Dart 3 record types `({void Function() cb, …})`
+are rejected by the VM-service eval frontend with RPC 113. Workaround:
+use `List<dynamic>` 2-tuples for the (cb, name) pairs. Added to the
+permanent list in `docs/learnings/vm-service-eval-quirks.md` (next
+edit).
+
+22 MCP tools, **64/64 unit tests** (was 57; +7 for by:text / descend /
+ambiguous), tap-demo and login-demo both green end-to-end. Skill +
+README + CLAUDE.md trigger updated for the new learning.
 
 ## Next intended step
 
-Two open paths — user's preference unclear, both are reasonable:
+Two open paths, user's preference unclear:
 
-1. **More gesture coverage** — `rc_flutter_long_press`, `rc_flutter_swipe`,
-   `rc_flutter_scroll`, `rc_flutter_dropdown_select`. Same pattern as tap:
-   find widget → invoke its handler / dispatch through scroll controller.
-   Estimated 30-60 min per primitive incl. live demo. Easiest win-by-win.
+1. **Real Flutter Web test session** — the user reported the original
+   findings while testing on Flutter Web. v0.6 fixes should make Web
+   workable; the diagnostic in particular will reveal any new
+   Web-specific issues. If new findings emerge → new learning file
+   `docs/learnings/flutter-web-quirks.md` + trigger row in CLAUDE.md.
+2. **More gesture coverage** — `rc_flutter_long_press`,
+   `rc_flutter_swipe`, `rc_flutter_scroll`, `rc_flutter_dropdown_select`.
+   Same pattern as tap. ~30-60 min per primitive incl. live demo.
+3. **Inspector key-matching fix** — Push `widget_find by=key` to the
+   Dart-eval path by default. Open since v0.5.
+4. **`CHANGELOG.md`** — git log has it but no human-readable summary.
+   15 min.
 
-2. **Inspector key-matching fix** — Currently `rc_flutter_widget_find
-   by=key` is unreliable because the cached inspector summary drops Key
-   info. We work around this with direct Dart eval (see
-   [`docs/learnings/inspector-tree-keys.md`](docs/learnings/inspector-tree-keys.md)).
-   Better: have `widget_find` use the Dart-eval path for `by=key` by
-   default, falling back to the cache for other matchers. ~45 min.
-
-3. **Bookkeeping**: write a `CHANGELOG.md` (we have it commit-by-commit
-   in `git log` but no human-readable summary). 15 min.
-
-User last leaned: "Lassen Sie uns mal einen Claude.md anlegen mit einer
-STATE.md" — so the immediate desire was project-memory hygiene, which is
-done. The next functional path is their call.
+User flow last expressed: "lass uns alles umsetzen" → Top-4 done, now
+they'll likely want the real-world re-test (path 1).
 
 ## Open friction
 
-- `rc_flutter_screenshot` doesn't work on macOS desktop
-  (`extension_not_registered`). Documented; not blocking.
-- The login demo patches `flutter_example/lib/main.dart` and restores
-  it. If a session is killed mid-demo, the user might find
-  `main.dart.agentic-bak` lying around — the script is robust against
-  SIGINT/SIGTERM but a `kill -9` would skip cleanup.
-- `widget_find by=key` cache-path bug → workaround in demo via direct
-  eval. See learning file.
+- `rc_flutter_screenshot` `extension_not_registered` on macOS desktop.
+- Login demo patches `flutter_example/lib/main.dart`; SIGKILL skips
+  cleanup (very rare; SIGINT/SIGTERM safe).
+- `widget_find by=key` still uses the cached inspector path (drops keys
+  on Text leaves) — workaround documented in
+  [`docs/learnings/inspector-tree-keys.md`](docs/learnings/inspector-tree-keys.md).
 
 ## Live context for the agent
 
 - **Active spec areas:** [`src/flutter/gesture_dart.ts`](src/flutter/gesture_dart.ts)
-  (single source of truth for all eval-injected Dart expressions),
-  [`src/tools/flutter/`](src/tools/flutter/) (MCP tool handlers).
-  When adding a new gesture, both directories get a sibling file +
-  registration in [`src/index.ts`](src/index.ts).
+  (Dart expressions; **use `List<dynamic>` for tuples, never records**),
+  [`src/tools/flutter/_eval_diagnostic.ts`](src/tools/flutter/_eval_diagnostic.ts)
+  (every new eval-driven tool must go through `safeEval`).
 - **Empirical Dart-eval constraints** captured in
-  `docs/learnings/vm-service-eval-quirks.md`. **Always single-line
-  expressions** (use `singleLine()` helper). Never reference
-  `@visibleForTesting` methods.
+  [`docs/learnings/vm-service-eval-quirks.md`](docs/learnings/vm-service-eval-quirks.md):
+  single-line only, no `@visibleForTesting`, no Dart 3 records.
+- **User-code-only widget tree by default** — pass
+  `include_framework:true` only when debugging framework wrappers.
 - **Demo discipline:** every new tool gets a live-driven script under
   `scripts/`. Live verification is the truth, not the unit tests.
-- **User mood:** building fast, pushing through; appreciates that we
-  hit each layer (lifecycle → inspector → gestures → text input) with
-  a working live demo before moving on. Don't slow down for over-design.
+- **User mood:** real-world feedback driven, expects rapid iteration —
+  not over-design. Surface gaps with diagnostics; fix in subsequent
+  passes.
 
 ## How to resume
 
 1. Read this file.
 2. `git log -5 --oneline` and `git status -s` — detect any drift since
-   2026-05-21 14:45.
-3. If clean and the user said "weiter": offer the three Next-intended-step
-   paths in 2 sentences each, wait for them to pick.
-4. If dirty: ask what the dirty changes are (might be human work between
-   sessions).
-5. Recent reflexion: every phase came in well under naive estimates
-   (PTY layer ~30 min, VM service ~30 min, inspector ~25 min, gestures
-   ~25 min, text input ~40 min incl. two debug bisects). Stay in
-   minute-units, not hour-units, for similar work.
+   2026-05-21 16:05.
+3. If clean and the user said "weiter": offer the four Next-intended-step
+   paths in 2 sentences each, wait for them to pick. Most likely they
+   want path 1 (Flutter Web real-world re-test) since v0.6 was built
+   for exactly that.
+4. Recent reflexion: v0.6 hardening came in ~50 min (4 features + tests
+   + docs + 1 bug fix on Dart records). Naive 60 min was a tight upper
+   bound; minute-unit calibration continues to hold.

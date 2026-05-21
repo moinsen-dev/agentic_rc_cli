@@ -6,8 +6,8 @@
 > structured tool calls. No human in the loop pressing `r`, copy-pasting log
 > excerpts, or reading the Dart VM Service URL off the terminal.
 
-[**22 MCP tools**](#tool-reference) · 57 unit tests · 6 live-driven demo scripts ·
-Claude Code skill bundled.
+[**22 MCP tools**](#tool-reference) · 64 unit tests · 6 live-driven demo scripts ·
+Claude Code skill bundled · v0.6.0 real-world hardened.
 
 ---
 
@@ -123,7 +123,7 @@ session ID flowing through all of it.
 
 | Tool | Does |
 | --- | --- |
-| `rc_flutter_widget_tree`       | Fetch live widget hierarchy as JSON. Each node: `{valueId, description, type, key, source_location, children}`. Cache-aware; pass `refresh: true` after a hot reload. |
+| `rc_flutter_widget_tree`       | Fetch live widget hierarchy as JSON. **Defaults to user-code-only**: framework subtrees collapse to `{_elided:true, framework_node_count:N}` markers. Opts: `include_framework`, `source_prefix` (strict path filter), `flat:true` (returns list with ancestry paths instead of nested tree — saves ~70% tokens). |
 | `rc_flutter_widget_find`       | Search by `key` / `type` / `description` / `source_contains`. Returns matches with ancestry `path` and `valueId`. |
 | `rc_flutter_widget_properties` | Diagnostic properties of any widget by `valueId` — text content, padding, colour, callbacks (incl. closure name!), …. |
 
@@ -139,10 +139,17 @@ interactive widget and **invokes its `onPressed` / `onTap` closure directly**
 
 | Tool | Does |
 | --- | --- |
-| `rc_flutter_tap`             | Tap a widget by `key` / `type` / `value_id`. Calls the widget's onPressed/onTap closure (FAB, ElevatedButton, GestureDetector, InkWell, ListTile, …). Walks ancestors if the matched widget itself isn't tappable. |
-| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` for a matched widget — useful for layout verification or computing positions of nearby widgets. |
-| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears, with `appear:false`). Use after navigation, after tap, after hot-reload. |
+| `rc_flutter_tap`             | Tap a widget by `key` / `type` / **`text`** / `value_id` / `coordinate`. Default walker order: **self → descendants → ancestors** (so custom wrappers like `TPKButton` around `TextButton` work). Detects ambiguous descendants and asks you to disambiguate. `descend:false` opts into the pre-v0.6 self → ancestors-only behaviour. |
+| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` for a matched widget — useful for layout verification. Supports `by:'text'`. |
+| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears, with `appear:false`). Supports `by:'text'`. Bubbles up eval errors instead of polling silently. |
 | `rc_flutter_enter_text`      | **Fill a TextField / TextFormField.** Walks to the underlying `EditableText`, mutates its `TextEditingController.text` (so `onChanged` fires, validators run, listeners notify). Modes: `replace` (default), `append`, `clear`. Must-have for any login / form / search-bar flow — without this the agent can't get past an auth gate. |
+
+**Diagnostic discipline (v0.6+):** every gesture tool result now carries
+`eval_ok` / `eval_kind` / `eval_error` / `expression_preview` so a failure
+tells you **why** — `eval_kind:"@Error"` with a Dart compile error is
+acted upon differently than `eval_kind:"@Instance"` with
+`reason:"no_callback_found"`. See
+[`docs/learnings/eval-diagnostic-discipline.md`](docs/learnings/eval-diagnostic-discipline.md).
 
 The composition that makes this powerful: `rc_flutter_enter_text` to fill,
 `rc_flutter_tap` to submit, `rc_flutter_widget_find` +

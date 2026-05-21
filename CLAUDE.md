@@ -33,6 +33,7 @@ loaded **on demand** via the Read tool — never read defensively.
 | `rc_flutter_widget_find by=key` returns empty when the widget clearly has the Key · adding a new search axis to the inspector · choosing between inspector-cache walk vs live Dart eval | [`docs/learnings/inspector-tree-keys.md`](docs/learnings/inspector-tree-keys.md) | search-by-type or search-by-source works for the current need |
 | `rc_flutter_screenshot` returns `{extension_not_registered}` · adding visual-verification logic · advising user about Peekaboo / chrome-devtools fallback | [`docs/learnings/screenshot-availability.md`](docs/learnings/screenshot-availability.md) | screenshot already works for the platform you're on |
 | writing a new `gesture_dart.ts` builder · introducing back-to-back eval-driven mutations · seeing "setState during build" or stack-frame-parser assertions | [`docs/learnings/framework-rebuild-pacing.md`](docs/learnings/framework-rebuild-pacing.md) | only adding a single non-mutating eval (e.g. read-only query) |
+| adding a new MCP tool that calls `svc.evaluate(…)` · debugging a tool that returns `raw_eval: null` without `eval_kind` · seeing `reason: "empty"` from a tap/geometry/wait_for · before merging any new eval-driven handler | [`docs/learnings/eval-diagnostic-discipline.md`](docs/learnings/eval-diagnostic-discipline.md) | the work is purely PTY-based with no eval call |
 
 **Self-learning rule:** when a non-obvious workaround / quirk / constraint
 surfaces during work in this repo, write a new file under

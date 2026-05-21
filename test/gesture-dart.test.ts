@@ -21,24 +21,54 @@ describe("buildTapExpression", () => {
   it("emits a key-matcher tap that references ValueKey + onPressed/onTap", () => {
     const expr = buildTapExpression({ by: "key", value: "submit-button" });
     expect(expr).toContain("ValueKey");
-    expect(expr).toContain('"submit-button"');
-    // We now invoke the widget's callback directly rather than dispatching a pointer event.
+    expect(expr).toContain("'submit-button'");
+    // Walker checks built-in tappable types
     expect(expr).toContain("FloatingActionButton");
     expect(expr).toContain("GestureDetector");
     expect(expr).toContain("visitAncestorElements");
-    expect(expr).toContain("cb!.call()");
+    // Calls the captured callback — List? form (records are blocked by eval).
+    expect(expr).toContain("(hit![0] as void Function())()");
   });
 
   it("emits a type-matcher tap that checks runtimeType.toString()", () => {
     const expr = buildTapExpression({ by: "type", value: "FloatingActionButton" });
     expect(expr).toContain("runtimeType.toString()");
-    expect(expr).toContain('"FloatingActionButton"');
+    expect(expr).toContain("'FloatingActionButton'");
+  });
+
+  it("by:text matches Text.data case-insensitively", () => {
+    const expr = buildTapExpression({ by: "text", value: "Sign In" });
+    // We lowercase the needle and lowercase the haystack
+    expect(expr).toContain("'sign in'");
+    expect(expr).toContain("w is Text");
+    expect(expr).toContain("toLowerCase()");
+  });
+
+  it("descend:true (default) emits the descendant-scan block", () => {
+    const expr = buildTapExpression({ by: "type", value: "TPKButton" });
+    // descend scan collects candidate tappables in the subtree
+    expect(expr).toContain("final cands");
+    expect(expr).toContain("scan");
+    expect(expr).toContain("ambiguous:");
+  });
+
+  it("descend:false skips the descendant block", () => {
+    const expr = buildTapExpression({ by: "type", value: "Row" }, { descend: false });
+    expect(expr).not.toContain("final cands");
+    expect(expr).not.toContain("ambiguous:");
+    // Ancestor walk still present
+    expect(expr).toContain("visitAncestorElements");
   });
 
   it("does not leak JS template interpolation into the Dart source", () => {
     const expr = buildTapExpression({ by: "key", value: "x" });
     expect(expr).not.toContain("undefined");
     expect(expr).not.toContain("NaN");
+  });
+
+  it("emits single-line expressions (Dart eval rejects multi-line)", () => {
+    const expr = buildTapExpression({ by: "type", value: "FloatingActionButton" });
+    expect(expr.includes("\n")).toBe(false);
   });
 });
 
@@ -50,6 +80,12 @@ describe("buildGeometryExpression", () => {
     expect(expr).toContain("s.width");
     expect(expr).toContain("s.height");
   });
+
+  it("supports by:text", () => {
+    const expr = buildGeometryExpression({ by: "text", value: "Welcome" });
+    expect(expr).toContain("'welcome'");
+    expect(expr).toContain("w is Text");
+  });
 });
 
 describe("buildExistsExpression", () => {
@@ -57,6 +93,11 @@ describe("buildExistsExpression", () => {
     const expr = buildExistsExpression({ by: "key", value: "logout" });
     expect(expr).toContain('"yes:');
     expect(expr).toContain('"not_found"');
+  });
+
+  it("supports by:text", () => {
+    const expr = buildExistsExpression({ by: "text", value: "Submit" });
+    expect(expr).toContain("'submit'");
   });
 });
 
@@ -71,9 +112,11 @@ describe("parseTapResult", () => {
       callback: "GestureDetector.onTap",
     });
   });
+
   it("flags not_found", () => {
     expect(parseTapResult("not_found")).toEqual({ ok: false, reason: "not_found" });
   });
+
   it("returns no_callback_found with the widget type", () => {
     expect(parseTapResult("no_callback_found:Text")).toEqual({
       ok: false,
@@ -81,12 +124,26 @@ describe("parseTapResult", () => {
       widget_type: "Text",
     });
   });
+
+  it("parses ambiguous:<list> into structured targets", () => {
+    const r = parseTapResult(
+      "ambiguous:TextButton:TextButton.onPressed|InkWell:InkWell.onTap",
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("ambiguous_descendants");
+    expect(r.ambiguous).toEqual([
+      { type: "TextButton", callback: "TextButton.onPressed" },
+      { type: "InkWell", callback: "InkWell.onTap" },
+    ]);
+  });
+
   it("flags coordinate_tap_unsupported", () => {
     expect(parseTapResult("coordinate_tap_unsupported:Dart eval forbids …")).toEqual({
       ok: false,
       reason: "coordinate_tap_unsupported",
     });
   });
+
   it("handles null", () => {
     expect(parseTapResult(null)).toEqual({ ok: false, reason: "empty" });
   });
@@ -115,7 +172,6 @@ describe("buildEnterTextExpression", () => {
     expect(expr).toContain("c.text = 'foo@bar.com'");
     expect(expr).toContain("EditableText");
     expect(expr).toContain("visitChildren");
-    // Same-line, no newlines (Dart eval rejects multi-line)
     expect(expr.includes("\n")).toBe(false);
   });
 
@@ -133,13 +189,9 @@ describe("buildEnterTextExpression", () => {
   it("escapes single quotes, backslashes, $, newlines in the value", () => {
     const tricky = "He's \\$\"100\" \n\tnext";
     const expr = buildEnterTextExpression({ by: "key", value: "x" }, tricky, "replace");
-    // Single quote escaped
     expect(expr).toContain("He\\'s");
-    // Backslash doubled
     expect(expr).toContain("\\\\");
-    // $ escaped (would otherwise be interpolation)
     expect(expr).toContain("\\$");
-    // No literal newline (we collapse + escape)
     expect(expr.includes("\n")).toBe(false);
     expect(expr).toContain("\\n");
     expect(expr).toContain("\\t");
@@ -155,15 +207,18 @@ describe("parseEnterTextResult", () => {
   it("parses set:<value>", () => {
     expect(parseEnterTextResult("set:hello")).toEqual({ ok: true, new_text: "hello" });
   });
+
   it("parses empty set (after clear)", () => {
     expect(parseEnterTextResult("set:")).toEqual({ ok: true, new_text: "" });
   });
+
   it("multiline values come back intact (set:.* uses s-flag)", () => {
     expect(parseEnterTextResult("set:line1\nline2")).toEqual({
       ok: true,
       new_text: "line1\nline2",
     });
   });
+
   it("flags no_editable_text with the widget type", () => {
     expect(parseEnterTextResult("no_editable_text:Container")).toEqual({
       ok: false,
@@ -171,9 +226,11 @@ describe("parseEnterTextResult", () => {
       widget_type: "Container",
     });
   });
+
   it("not_found falls through to reason", () => {
     expect(parseEnterTextResult("not_found")).toEqual({ ok: false, reason: "not_found" });
   });
+
   it("null/empty", () => {
     expect(parseEnterTextResult(null)).toEqual({ ok: false, reason: "empty" });
   });
