@@ -260,11 +260,29 @@ export class FlutterService {
     const probeErrors: string[] = [];
     for (const cand of candidates) {
       try {
-        await this.client.call("evaluate", {
+        // Important: the VM-service `evaluate` RPC does NOT throw on
+        // compilation failures — it returns a regular response of shape
+        // `{ type: "@Error", kind: "error", message: "..." }`. So we
+        // must inspect the response, not rely on try/catch alone. Pre-
+        // v0.6.2 we only had the catch, which meant the first candidate
+        // (typically rootLib) always "won" silently and got cached even
+        // when its scope couldn't resolve `Element` — and every gesture
+        // tool then used the broken target.
+        const r = (await this.client.call("evaluate", {
           isolateId,
           targetId: cand.id,
           expression: "Element",
-        });
+        })) as Record<string, unknown>;
+        const rType = r["type"];
+        const rKind = r["kind"];
+        if (rType === "@Error" || rType === "Error" || rKind === "error") {
+          const msg = (r["message"] ?? r["valueAsString"] ?? "@Error")
+            .toString()
+            .replace(/\n/g, " ")
+            .slice(0, 160);
+          probeErrors.push(`${cand.uri}: ${msg}`);
+          continue;
+        }
         this.cachedEvalLibraryId = cand.id;
         this.cachedEvalLibraryUri = cand.uri;
         return cand.id;
