@@ -4,6 +4,9 @@ import { createRequire } from "node:module";
 import type { Terminal as ITerminal } from "@xterm/headless";
 import { spawn as ptySpawn, type IPty } from "node-pty";
 import type { SessionId, SessionStatus, SessionInfo, SpawnOptions } from "./types.js";
+import { FlutterEndpointSniffer, type FlutterEndpoints } from "./flutter/endpoints.js";
+import { VmServiceClient } from "./flutter/vm_service.js";
+import { FlutterService } from "./flutter/flutter_service.js";
 
 // @xterm/headless is published as CJS without a real ESM facade, so the only
 // reliable cross-runtime import (Node 20+ and vitest) is to require it.
@@ -55,6 +58,9 @@ export class Session extends EventEmitter {
   private _exitCode: number | null = null;
   private _cols: number;
   private _rows: number;
+  private flutterSniffer = new FlutterEndpointSniffer();
+  private _flutterService: FlutterService | null = null;
+  private _flutterServiceConnecting: Promise<FlutterService> | null = null;
 
   constructor(opts: SpawnOptions) {
     super();
@@ -91,6 +97,7 @@ export class Session extends EventEmitter {
       this.term.write(chunk);
       this.totalBytesRead += Buffer.byteLength(chunk, "utf8");
       this.appendRaw(chunk);
+      this.flutterSniffer.feed(chunk);
       this.emit("data", chunk);
     });
 
@@ -100,6 +107,9 @@ export class Session extends EventEmitter {
       if (this._status !== "killed") {
         this._status = "exited";
       }
+      // Tear down any VM-service connection so we don't leak sockets.
+      void this._flutterService?.dispose().catch(() => undefined);
+      this._flutterService = null;
       this.emit("exit", { exitCode, signal: signal ?? null });
     });
   }
@@ -280,6 +290,80 @@ export class Session extends EventEmitter {
     return this.totalBytesWritten;
   }
 
+  /** Snapshot of Flutter debug-service endpoints scraped from the PTY output. */
+  get flutterEndpoints(): FlutterEndpoints {
+    return this.flutterSniffer.current;
+  }
+
+  hasFlutterEndpoints(): boolean {
+    return this.flutterSniffer.hasAny();
+  }
+
+  /** True iff the VM-service WebSocket has been opened and is alive. */
+  get flutterServiceConnected(): boolean {
+    return this._flutterService?.vmClient.connected === true;
+  }
+
+  /**
+   * Wait until the sniffer has detected at least the VM-service WebSocket URL,
+   * or reject on timeout / session exit.
+   */
+  async waitForFlutterEndpoint(timeoutMs = 180_000): Promise<FlutterEndpoints> {
+    if (this.flutterSniffer.current.vm_service_ws) return this.flutterSniffer.current;
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve, reject) => {
+      const tick = (): void => {
+        if (this._status !== "running") {
+          reject(new Error(`Session exited before Flutter endpoint appeared (status=${this._status})`));
+          return;
+        }
+        if (this.flutterSniffer.current.vm_service_ws) {
+          resolve(this.flutterSniffer.current);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new Error(`Timed out after ${timeoutMs} ms waiting for Flutter debug endpoint`));
+          return;
+        }
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+  }
+
+  /**
+   * Connects to the Dart VM Service (lazily) and returns a FlutterService.
+   * Idempotent: subsequent calls return the cached instance.
+   */
+  async ensureFlutterService(opts: { waitForEndpointMs?: number; subscribe?: boolean } = {}): Promise<FlutterService> {
+    if (this._flutterService) return this._flutterService;
+    if (this._flutterServiceConnecting) return this._flutterServiceConnecting;
+    const waitMs = opts.waitForEndpointMs ?? 180_000;
+    const subscribe = opts.subscribe ?? true;
+    this._flutterServiceConnecting = (async () => {
+      const endpoints = await this.waitForFlutterEndpoint(waitMs);
+      const wsUrl = endpoints.vm_service_ws;
+      if (!wsUrl) throw new Error("VM service WebSocket URL missing");
+      const client = new VmServiceClient(wsUrl);
+      await client.connect();
+      const svc = new FlutterService(client);
+      if (subscribe) await svc.ensureSubscribed();
+      this._flutterService = svc;
+      this._flutterServiceConnecting = null;
+      return svc;
+    })();
+    try {
+      return await this._flutterServiceConnecting;
+    } catch (err) {
+      this._flutterServiceConnecting = null;
+      throw err;
+    }
+  }
+
+  flutterServiceOrNull(): FlutterService | null {
+    return this._flutterService;
+  }
+
   info(): SessionInfo {
     return {
       id: this.id,
@@ -295,6 +379,7 @@ export class Session extends EventEmitter {
       cols: this._cols,
       bytes_written: this.totalBytesWritten,
       bytes_read: this.totalBytesRead,
+      flutter: this.flutterSniffer.hasAny() ? this.flutterSniffer.current : null,
     };
   }
 }

@@ -127,6 +127,29 @@ session ID flowing through all of it.
 | `rc_flutter_widget_find`       | Search by `key` / `type` / `description` / `source_contains`. Returns matches with ancestry `path` and `valueId`. |
 | `rc_flutter_widget_properties` | Diagnostic properties of any widget by `valueId` — text content, padding, colour, callbacks (incl. closure name!), …. |
 
+### 4. Agentic gesture injection (tap & verify)
+
+This is where `agentic-rc-mcp` replaces Peekaboo and chrome-devtools-mcp for
+Flutter apps — both of which struggle with Flutter's custom-rendered canvas.
+We don't dispatch OS-level pointer events (the framework's
+`handlePointerEvent` is `@visibleForTesting` and the VM-service eval refuses
+to compile references to it). Instead the tap tool walks to the nearest
+interactive widget and **invokes its `onPressed` / `onTap` closure directly**
+— same `setState`, same rebuild, same side-effects, no GUI access needed.
+
+| Tool | Does |
+| --- | --- |
+| `rc_flutter_tap`             | Tap a widget by `key` / `type` / `value_id`. Calls the widget's onPressed/onTap closure (FAB, ElevatedButton, GestureDetector, InkWell, ListTile, …). Walks ancestors if the matched widget itself isn't tappable. |
+| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` for a matched widget — useful for layout verification or computing positions of nearby widgets. |
+| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears, with `appear:false`). Use after navigation, after tap, after hot-reload. |
+
+The composition that makes this powerful: `rc_flutter_tap` to act,
+`rc_flutter_widget_find` + `rc_flutter_widget_properties` to **verify the
+state change**. End-to-end behavioural testing entirely through MCP. See
+[`scripts/flutter-tap-demo.mjs`](scripts/flutter-tap-demo.mjs) — 7
+synthetic taps on the counter app's FAB, each verified by re-reading the
+Text widget's `data` property (0 → 7).
+
 ## Install
 
 Requires Node ≥ 20.
@@ -229,22 +252,39 @@ rc_flutter_widget_properties { session_id: "8fa45718",
 //       description: "Closure: () => void from Function '_incrementCounter@…'" },
 //     { name: "tooltip", description: "\"Increment\"" }, … ] }
 
-// 7. Run arbitrary Dart in the app's context.
+// 7. ACT — tap the button (no Peekaboo, no chrome-devtools, no GUI access).
+rc_flutter_tap { session_id: "8fa45718",
+                 by: "type", value: "FloatingActionButton" }
+// → { success: true, callback: "FloatingActionButton.onPressed" }
+//
+// The widget's onPressed closure runs directly. setState fires. Frame rebuilds.
+
+// 8. VERIFY — re-read the counter Text's `data` to confirm the state change.
+rc_flutter_widget_find { session_id: "8fa45718", by: "type", value: "Text",
+                         refresh: true }
+rc_flutter_widget_properties { session_id: "8fa45718",
+                               value_id: "<counter-text-valueId>" }
+// → { properties: [ { name: "data", description: "\"1\"" }, … ] }
+
+// 9. Run arbitrary Dart in the app's context.
 rc_flutter_eval { session_id: "8fa45718",
                   expression: "WidgetsBinding.instance.framesEnabled" }
 // → { kind: "Instance", valueAsString: "true" }
 
-// 8. Clean shutdown.
+// 10. Clean shutdown.
 rc_send_keys { session_id: "8fa45718", keys: "q" }
 //   …or fall back to a signal:
 rc_stop { session_id: "8fa45718", wait_ms: 3000, remove: true }
 ```
 
 That sequence is exactly what
-[`scripts/flutter-inspector-demo.mjs`](scripts/flutter-inspector-demo.mjs)
-and [`scripts/flutter-vm-agentic-loop.mjs`](scripts/flutter-vm-agentic-loop.mjs)
-run as end-to-end smoke tests against the sample
-[`flutter_example/`](flutter_example) counter app.
+[`scripts/flutter-inspector-demo.mjs`](scripts/flutter-inspector-demo.mjs),
+[`scripts/flutter-vm-agentic-loop.mjs`](scripts/flutter-vm-agentic-loop.mjs),
+and [`scripts/flutter-tap-demo.mjs`](scripts/flutter-tap-demo.mjs) run as
+end-to-end smoke tests against the sample
+[`flutter_example/`](flutter_example) counter app. The tap demo executes
+7 synthetic taps on the FAB and asserts the counter Text's `data` property
+transitions 0 → 7 — pure VM-service, no GUI access.
 
 ## Named-key cheat sheet (`rc_send_keys`)
 
@@ -293,6 +333,7 @@ node scripts/flutter-drive.mjs               # spawn flutter, hot-reload, quit
 node scripts/flutter-error-detect.mjs        # detect runtime exceptions via PTY
 node scripts/flutter-vm-agentic-loop.mjs     # full structured loop via VM service
 node scripts/flutter-inspector-demo.mjs      # widget-tree + find + properties
+node scripts/flutter-tap-demo.mjs            # 7 taps + assert counter 0 → 7
 ```
 
 ## What this is not (yet)
@@ -302,9 +343,10 @@ node scripts/flutter-inspector-demo.mjs      # widget-tree + find + properties
   written.)
 - **Not multi-user.** Single process, single session registry, no auth.
 - **No persistence.** Killing the MCP server kills every child it started.
-- **No pixel taps inside the running app window.** This MCP sends *keystrokes
-  to the PTY*, not pointer events to the GUI. For real clicks inside the
-  Flutter / Electron / browser window, pair with
+- **No pixel taps inside non-Flutter windows.** For **Flutter** apps we DO
+  fire onPressed/onTap directly via `rc_flutter_tap` — Peekaboo and
+  chrome-devtools-mcp are no longer needed. For other GUI apps (Electron,
+  native Cocoa, web) you still need an OS-level driver:
   [Peekaboo](https://github.com/steipete/Peekaboo) or
   [`chrome-devtools-mcp`](https://github.com/cnove/chrome-devtools-mcp) —
   then drain errors via this MCP to see what your tap broke.

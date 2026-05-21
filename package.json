@@ -19,6 +19,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "node scripts/smoke.mjs",
+    "install:skill": "bash scripts/install-skill.sh",
     "postinstall": "node scripts/fix-node-pty-permissions.js",
     "prepublishOnly": "npm run build"
   },
@@ -41,10 +42,12 @@
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@xterm/headless": "^5.5.0",
     "node-pty": "^1.0.0",
+    "ws": "^8.20.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

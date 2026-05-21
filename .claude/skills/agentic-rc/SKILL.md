@@ -50,6 +50,9 @@ human-in-the-loop** when running interactive local programs.
 | `rc_flutter_widget_tree` | Fetch the live widget tree as JSON (summary). Each node carries `{valueId, description, type, key, source_location, children}`. Cache-aware; pass `refresh: true` after a hot-reload. |
 | `rc_flutter_widget_find` | Search the live tree by `key`, `type`, `description` substring, or `source_contains`. Returns matches with ancestry `path` and `valueId`. |
 | `rc_flutter_widget_properties` | Read a widget's diagnostic properties (text content, padding, callbacks, colours, …) by its `valueId` from `_find` / `_tree`. |
+| `rc_flutter_tap` | **Tap a widget.** Identifies via `key`/`type`/`value_id` and calls the widget's `onPressed`/`onTap` closure directly (FAB, ElevatedButton, GestureDetector, InkWell, ListTile, …). Walks ancestors if the matched widget itself isn't tappable. |
+| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` of the matched widget — useful for verifying layout or computing tap coordinates for nearby widgets. |
+| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears with `appear:false`). Use after navigation, after tap, after hot-reload — any moment you'd otherwise sleep blindly. |
 
 ## The canonical Flutter agent loop
 
@@ -128,6 +131,67 @@ Key search modes for `rc_flutter_widget_find`:
   description (good when you don't know the exact class).
 - `by: "source_contains"` — match anywhere in the `file:line:col` source
   location string. Use this to find "the widget defined around lib/foo.dart:42".
+
+## Agentic interaction loop — tap and verify behaviour
+
+This is the **endgame** of agentic testing: the agent presses a button and
+verifies the resulting state change — entirely through MCP, without Peekaboo
+or chrome-devtools-mcp (which both work poorly against Flutter's
+custom-rendered canvas).
+
+```text
+1. (optional) rc_flutter_widget_geometry { session_id, by: "type",
+                                           value: "FloatingActionButton" }
+   → confirm the widget is actually laid out + visible (rect is non-zero).
+
+2. rc_flutter_tap { session_id, by: "type", value: "FloatingActionButton" }
+   → returns { success: true, callback: "FloatingActionButton.onPressed" }
+     We invoke the widget's own `onPressed` closure directly. setState fires,
+     framework rebuilds.
+
+3. wait ~300 ms for the rebuild (Flutter's microtask + frame cycle).
+
+4. rc_flutter_widget_find { session_id, by: "type", value: "Text",
+                            refresh: true }   ← refresh after rebuild
+   → re-locate the relevant Text node.
+
+5. rc_flutter_widget_properties { session_id, value_id: <from step 4> }
+   → read the `data` property.   ASSERT it matches the expected new state.
+
+6. (after the whole sequence) rc_flutter_drain_errors → must be empty.
+```
+
+This loop is the verified pattern in
+[`scripts/flutter-tap-demo.mjs`](../../scripts/flutter-tap-demo.mjs):
+7 synthetic taps on the counter app's FAB, each verified by reading the
+counter Text's `data` property — 0 → 7 with no human and no GUI access.
+
+### Why tap calls onPressed directly (and not synthetic pointer events)
+
+The natural reflex is to dispatch `PointerDownEvent` + `PointerUpEvent` via
+`WidgetsBinding.handlePointerEvent`. That **does not work** because
+`handlePointerEvent` is annotated `@visibleForTesting` and the Dart VM
+service's `evaluate` RPC refuses to compile expressions that reference
+test-only APIs (error code 113). We discovered this empirically — see
+`scripts/eval-debug.mjs` for the bisection.
+
+Workaround: walk the element tree to the nearest interactive widget and
+**invoke its callback directly**. Semantically identical (setState fires,
+framework rebuilds, side effects run); only difference is no ripple
+animation and no GestureRecognizer state-machine transition. For
+behavioural verification that's perfect; for animation verification it's
+not — but in practice we never verify ripples agentically anyway.
+
+Supported tappable widget types (covered by ancestor-walking):
+FloatingActionButton, ElevatedButton, TextButton, OutlinedButton,
+FilledButton, IconButton, GestureDetector, InkWell, InkResponse, ListTile.
+
+### Why expressions are single-line
+
+Another empirical finding: the Dart VM service's `evaluate` RPC rejects
+multi-line expression strings with "Expression compilation error" (code
+113). The internal `gesture_dart.ts` builder writes templates with
+newlines for readability, then collapses to one line before sending.
 
 ## When NOT to use this skill
 

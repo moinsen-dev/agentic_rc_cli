@@ -1,3 +1,5 @@
+import type { FlutterEndpoints } from "./flutter/endpoints.js";
+
 export type SessionId = string;
 
 export type SessionStatus = "running" | "exited" | "killed";
@@ -16,6 +18,8 @@ export interface SessionInfo {
   cols: number;
   bytes_written: number;
   bytes_read: number;
+  /** Present when the session detected Flutter debug endpoints. */
+  flutter: FlutterEndpoints | null;
 }
 
 export interface SpawnOptions {

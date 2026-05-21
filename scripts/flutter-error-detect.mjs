@@ -132,8 +132,9 @@ async function main() {
         name: "rc_wait_for",
         arguments: {
           session_id: sid,
-          // regex OR — matches whichever appears first
-          pattern: "/EXCEPTION CAUGHT BY WIDGETS LIBRARY|Flutter run key commands/",
+          // Flutter 3.44 banner text is mixed-case; also accept the bare
+          // separator line which always precedes the stack.
+          pattern: "/Exception caught by widgets library|══════════ Exception|Flutter run key commands/i",
           timeout_ms: 300_000,
           source: "stream",
         },
@@ -142,19 +143,37 @@ async function main() {
     ),
   );
 
-  const sawException = /EXCEPTION CAUGHT BY WIDGETS LIBRARY/i.test(wait.matched_text ?? "");
+  // Even if `Flutter run key commands` matched first, the app may have ALSO
+  // thrown — Flutter keeps the run-loop alive and shows the red error widget.
+  // So do a second read across the full scrollback for definitive error
+  // markers.
+  await sleep(2000);
+  const errorScan = unwrap(
+    await send("tools/call", {
+      name: "rc_read_screen",
+      arguments: { session_id: sid, mode: "scrollback" },
+    }),
+  );
+  const errorMarker =
+    /Exception caught by widgets library|═{5,} Exception ═{5,}|The following _?Exception was thrown/i;
+  const sawException = errorMarker.test(errorScan.text);
+  const matchLine =
+    errorScan.text
+      .split("\n")
+      .find((l) => errorMarker.test(l)) ?? null;
+
   console.log(
-    `  matched: '${wait.matched_text}' — ${sawException ? "❌ EXCEPTION DETECTED" : "ready (no error)"}`,
+    `  wait_for matched: '${wait.matched_text}'`,
+  );
+  console.log(
+    `  scrollback scan: ${sawException ? `❌ EXCEPTION DETECTED — '${matchLine?.trim()}'` : "no error markers"}`,
   );
 
-  // Give Flutter a moment more to print the full stack-trace block.
-  await sleep(1500);
-
-  console.log("→ rc_read_screen mode=scrollback (last 35 lines)");
+  console.log("→ rc_read_screen mode=tail (last 60 lines, to show what the agent would see)");
   const tail = unwrap(
     await send("tools/call", {
       name: "rc_read_screen",
-      arguments: { session_id: sid, mode: "tail", tail_lines: 35 },
+      arguments: { session_id: sid, mode: "tail", tail_lines: 60 },
     }),
   );
   console.log("  ── captured console ──────────────────────────────────────");
