@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+.env
+.env.local
+coverage/
+.vscode/
+.idea/
+
+# Vitest output
+.vitest-cache/
+test-results/

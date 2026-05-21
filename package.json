@@ -1,0 +1,52 @@
+{
+  "name": "@moinsen/agentic-rc-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that gives an AI agent remote control over interactive local processes via PTY (start/stop/send-keys/read-screen/wait-for).",
+  "type": "module",
+  "bin": {
+    "agentic-rc-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "node scripts/smoke.mjs",
+    "postinstall": "node scripts/fix-node-pty-permissions.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "anthropic",
+    "pty",
+    "terminal",
+    "agent",
+    "flutter",
+    "remote-control"
+  ],
+  "author": "Moinsen <developer@moinsen.dev>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@xterm/headless": "^5.5.0",
+    "node-pty": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "_comment_": "Drop this file (renamed to '.mcp.json') into the root of any project where you want Claude Code to be able to remote-control processes. Pick ONE of the three 'agentic-rc' variants below — the others are kept as documentation. The '_comment_' keys are ignored by MCP clients.",
+
+  "mcpServers": {
+    "_variant_1_doc_": "RECOMMENDED — after `npm link` in the agentic_rc_cli repo, this is all you need. The bin lives on PATH as `agentic-rc-mcp`.",
+    "agentic-rc": {
+      "command": "agentic-rc-mcp"
+    },
+
+    "_variant_2_doc_": "No `npm link` needed — point Node at the built dist file directly. Use this when you don't want a global symlink. Replace the path with your clone location.",
+    "agentic-rc-direct": {
+      "command": "node",
+      "args": [
+        "/Users/udi/work/moinsen/ideas/agentic_rc_cli/dist/index.js"
+      ]
+    },
+
+    "_variant_3_doc_": "Development mode — runs the TypeScript source directly via tsx, so edits in src/ take effect on the next Claude Code restart without a rebuild. Slower cold-start.",
+    "agentic-rc-dev": {
+      "command": "npx",
+      "args": [
+        "--prefix",
+        "/Users/udi/work/moinsen/ideas/agentic_rc_cli",
+        "tsx",
+        "/Users/udi/work/moinsen/ideas/agentic_rc_cli/src/index.ts"
+      ]
+    }
+  }
+}

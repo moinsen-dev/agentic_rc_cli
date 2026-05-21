@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agentic-rc": {
+      "command": "node",
+      "args": [
+        "/Users/udi/work/moinsen/ideas/agentic_rc_cli/dist/index.js"
+      ]
+    }
+  }
+}
