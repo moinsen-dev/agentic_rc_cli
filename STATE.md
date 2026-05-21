@@ -1,127 +1,161 @@
 # STATE — agentic_rc_cli
 
-> **Frozen:** 2026-05-21 16:55 (Europe/Berlin)
+> **Frozen:** 2026-05-21 17:30 (Europe/Berlin)
 > **Branch:** develop
-> **Last commit:** `8ea1000` · feat: real-world hardening v0.6.0
-> **Dirty:** uncommitted v0.6.1 eval-target-library fix — staging now
+> **Last commit:** `fd4d867` · fix(eval): probing must inspect response for @Error
+> **Version:** v0.6.2 published, v0.6.3 planning surfaced (see below)
 
 ## Last work-unit
 
-Shipped **v0.6.1** — the actual fundamental fix for Flutter Web that
-v0.6.0's diagnostic surfaced. Flutter Web's `rootLib` is a generated
-`web_entrypoint.dart` that doesn't import the framework → eval against
-it can't resolve `Element` / `WidgetsBinding` / `*Button`. Every
-gesture / inspector tool failed silently on Web (would have, before
-v0.6.0 diagnostic; failed loudly with `eval_kind:"@Error",
-eval_error:"RPC 113 Expression compilation error"` after).
+Shipped **v0.6.2** — probing-loop must inspect the evaluate-RPC response
+for `{type: "@Error"}`, not rely on try/catch alone. The VM-service
+`evaluate` RPC does NOT throw on compilation failures; it returns a
+normal response of shape `{type: "@Error", kind: "error", message: "…"}`.
+Pre-fix, the v0.6.1 probing loop's catch never fired, the first
+candidate (rootLib) always "won" silently and got cached even when its
+scope couldn't resolve `Element`. Every gesture tool then used the
+broken target.
 
-**Fix:** `FlutterService.evalTargetLibraryId()` probes each candidate
-library with the bare identifier `Element`. First one that compiles
-wins, cached for the session. Order: `rootLib` → `material.dart` →
-`widgets.dart` → `cupertino.dart`. macOS keeps using rootLib (1 probe
-call), Web transparently falls back to material.dart (2-4 probe
-calls).
+Verified by direct VM-service test against the TPK Web Console
+session that reproduced the original problem.
 
-Captured the new constraint as Constraint #5 + #4 (Dart 3 records ban)
-in `docs/learnings/vm-service-eval-quirks.md`. 64/64 unit tests +
-tap-demo + login-demo all green on macOS — no regression. Ready for
-re-test against the user's Flutter Web app.
+## ⚠️ But — fundamental architecture issue uncovered
 
-Previous v0.6.0 changes also still in this commit chain:
+User then tried v0.6.2 against TWO Flutter targets (Web on Chrome AND
+macOS native) for the TesterPayKit Web Console (a real, non-trivial
+Flutter app with `moinsen_runapp` wrapper, GoRouter, Riverpod). Both
+failed at the probing stage with `eval_error: "No library in the
+running isolate has Element in scope. Probed: <rootLib>, material.dart,
+widgets.dart, cupertino.dart"`.
 
-Shipped **v0.6.0** real-world hardening, based on a Flutter Web session
-where four blockers surfaced. Top-4 prio agreed with user, implemented:
+Direct VM-service probe with `evaluate` RPC against each library
+confirmed:
 
-1. **Universal eval diagnostic** — new shared `safeEval` helper in
-   [`src/tools/flutter/_eval_diagnostic.ts`](src/tools/flutter/_eval_diagnostic.ts).
-   Every tool that calls `svc.evaluate(...)` now surfaces
-   `eval_ok` / `eval_kind` / `eval_error` / `expression_preview` instead
-   of the v0.5 opaque `reason: "empty", raw_eval: null`. Migrated tap,
-   widget_geometry, wait_for_widget; enter_text already had its own
-   diagnostic. Convention captured in
-   [`docs/learnings/eval-diagnostic-discipline.md`](docs/learnings/eval-diagnostic-discipline.md).
-2. **Tap walker: self → descendants → ancestors** (default; opt-out
-   `descend:false`). Real apps wrap built-ins in custom widgets
-   (`TPKButton` → `TextButton`); old walker missed them. Multiple
-   descendants → `reason:"ambiguous_descendants"` + structured target
-   list so the agent can disambiguate via `by:"key"` instead of
-   guessing.
-3. **`by: "text"` matcher** on tap/geometry/wait_for_widget. Match a
-   `Text` widget whose `data` contains the value (case-insensitive
-   substring). Pairs with the descendant-first walker: `by:"text",
-   value:"Sign In"` finds the wrapping button via ancestor walk.
-4. **widget_tree filtering & flat mode**. Default
-   `include_framework:false` — framework subtrees collapse to
-   `{_elided:true, framework_node_count:N}` markers (kills the 200 KB
-   tree explosion). `source_prefix:"…"` for strict path filter.
-   `flat:true` returns a flat list with `path` strings instead of a
-   nested tree (~70% token saving combined with source_prefix).
+- `package:flutter/material.dart` → `Element` undefined
+- `package:flutter/widgets.dart` → `Element` undefined
+- `package:flutter/cupertino.dart` → `Element` undefined
+- `package:flutter/src/widgets/framework.dart` → ✅ `Element` resolves
+- `package:flutter/src/widgets/binding.dart` → ✅ `WidgetsBinding` resolves
 
-One bug rediscovered: Dart 3 record types `({void Function() cb, …})`
-are rejected by the VM-service eval frontend with RPC 113. Workaround:
-use `List<dynamic>` 2-tuples for the (cb, name) pairs. Added to the
-permanent list in `docs/learnings/vm-service-eval-quirks.md` (next
-edit).
+**The hub libraries (material/widgets/cupertino) are pure re-exports.**
+Re-exports do NOT bring symbols into the host library's evaluate-scope.
+Only the source-file where a symbol is DIRECTLY declared has it in
+scope. The probing strategy was correct in concept but probed the
+wrong library URIs.
 
-22 MCP tools, **64/64 unit tests** (was 57; +7 for by:text / descend /
-ambiguous), tap-demo and login-demo both green end-to-end. Skill +
-README + CLAUDE.md trigger updated for the new learning.
+**Worse:** even with `framework.dart` as targetId, our gesture-walker
+expressions still reference `FloatingActionButton`, `TextButton`,
+`GestureDetector`, etc. — those live in different source files.
+**No single library has all the framework types our walker uses in
+its evaluate-scope at the same time.**
 
-## Next intended step
+## Next intended step — v0.6.3 candidate paths
 
-Two open paths, user's preference unclear:
+Two routes under consideration, neither trivial:
 
-1. **Real Flutter Web test session** — the user reported the original
-   findings while testing on Flutter Web. v0.6 fixes should make Web
-   workable; the diagnostic in particular will reveal any new
-   Web-specific issues. If new findings emerge → new learning file
-   `docs/learnings/flutter-web-quirks.md` + trigger row in CLAUDE.md.
-2. **More gesture coverage** — `rc_flutter_long_press`,
-   `rc_flutter_swipe`, `rc_flutter_scroll`, `rc_flutter_dropdown_select`.
-   Same pattern as tap. ~30-60 min per primitive incl. live demo.
-3. **Inspector key-matching fix** — Push `widget_find by=key` to the
-   Dart-eval path by default. Open since v0.5.
-4. **`CHANGELOG.md`** — git log has it but no human-readable summary.
-   15 min.
+### Path A — Reflection-based expression builder
 
-User flow last expressed: "lass uns alles umsetzen" → Top-4 done, now
-they'll likely want the real-world re-test (path 1).
+Rewrite every eval expression in `gesture_dart.ts` to use
+`runtimeType.toString()` comparisons instead of `is` checks:
 
-## Open friction
+```dart
+// Before (needs FloatingActionButton in eval-scope):
+if (x is FloatingActionButton && x.onPressed != null) …
+
+// After (needs only Widget + runtimeType comparison):
+if (x.runtimeType.toString() == 'FloatingActionButton') {
+  final cb = (x as dynamic).onPressed;
+  if (cb != null) …
+}
+```
+
+With this rewrite, `framework.dart` alone (which has `Element`,
+`Widget`, `RenderObject` directly) is enough for the full gesture
+walker. Loses static type safety inside the eval string, but the
+expression is already a string-constructed Dart fragment so there was
+no real static safety to begin with.
+
+Effort: ~60-90 min including unit-test regression + live-demo
+verification on both desktop and Web.
+
+### Path B — Migrate to `ext.flutter.inspector.*` service extensions
+
+Flutter's widget inspector exposes service extensions that don't need
+an evaluate-scope at all:
+
+- `ext.flutter.inspector.getRootWidgetSummaryTree` — already used.
+- `ext.flutter.inspector.getProperties` — already used.
+- `ext.flutter.inspector.getRenderObject` — gives us a RenderObject
+  ObjectId we can `getObject` on to read its size + position.
+- `ext.flutter.inspector.getLayoutExplorerNode` — even richer layout
+  info.
+
+For taps, no built-in service extension exists. Path B requires
+shipping a custom service extension as part of the SDK that an app
+opts into by `import 'package:agentic_rc_helpers/agentic_rc_helpers.dart'
++ AgenticRcHelpers.register()` in main. Heavier on the app side but
+zero eval-scope dependency at the tool side.
+
+Effort: ~3-4 hours including the helper-package scaffold.
+
+### Recommended approach
+
+**Path A first**, then Path B as a v1.0 hardening. Path A is incremental
+on what's there; Path B is the eventual architecturally correct answer
+but adds a runtime dep for the consuming app.
+
+## Scope documented for users
+
+The `~/.claude/skills/agentic-rc/SKILL.md` has been trimmed to
+**Flutter process control + read-only introspection** as the
+recommended scope. The 4 eval-based interaction tools (tap,
+enter_text, wait_for_widget by:text, widget_geometry) are listed in
+an "⚠️ Experimental / known limitations" section at the bottom with
+the full architectural explanation and pointer to this STATE.md for
+the v0.6.3 plan.
+
+Net effect on agent behaviour: agents using the skill will no longer
+attempt to drive UI agentically on real apps and will default to
+`Peekaboo` / `chrome-devtools-mcp` for tap dispatch, with agentic-rc
+filling the introspection + drain_errors role.
+
+## Open friction (still relevant)
 
 - `rc_flutter_screenshot` `extension_not_registered` on macOS desktop.
-- Login demo patches `flutter_example/lib/main.dart`; SIGKILL skips
-  cleanup (very rare; SIGINT/SIGTERM safe).
-- `widget_find by=key` still uses the cached inspector path (drops keys
-  on Text leaves) — workaround documented in
-  [`docs/learnings/inspector-tree-keys.md`](docs/learnings/inspector-tree-keys.md).
+- `widget_find by=key` uses the cached inspector path that drops keys
+  on Text leaves (eval workaround in `docs/learnings/inspector-tree-keys.md`).
+- The 4 interaction tools listed above — covered in detail in the
+  v0.6.3 plan.
 
 ## Live context for the agent
 
-- **Active spec areas:** [`src/flutter/gesture_dart.ts`](src/flutter/gesture_dart.ts)
-  (Dart expressions; **use `List<dynamic>` for tuples, never records**),
-  [`src/tools/flutter/_eval_diagnostic.ts`](src/tools/flutter/_eval_diagnostic.ts)
-  (every new eval-driven tool must go through `safeEval`).
+- **Active spec areas:**
+  [`src/flutter/gesture_dart.ts`](src/flutter/gesture_dart.ts) — needs
+  Path-A reflection rewrite,
+  [`src/flutter/flutter_service.ts`](src/flutter/flutter_service.ts) —
+  `evalTargetLibraryId()` probing list candidates (line 235-280)
+  also wants framework.dart added before material.dart for the
+  pre-Path-A case.
 - **Empirical Dart-eval constraints** captured in
   [`docs/learnings/vm-service-eval-quirks.md`](docs/learnings/vm-service-eval-quirks.md):
-  single-line only, no `@visibleForTesting`, no Dart 3 records.
+  single-line only, no `@visibleForTesting`, no Dart 3 records, hub
+  libraries don't bring re-exports into evaluate-scope (new Constraint #6
+  — needs adding).
 - **User-code-only widget tree by default** — pass
   `include_framework:true` only when debugging framework wrappers.
 - **Demo discipline:** every new tool gets a live-driven script under
   `scripts/`. Live verification is the truth, not the unit tests.
-- **User mood:** real-world feedback driven, expects rapid iteration —
-  not over-design. Surface gaps with diagnostics; fix in subsequent
-  passes.
 
 ## How to resume
 
 1. Read this file.
-2. `git log -5 --oneline` and `git status -s` — detect any drift since
-   2026-05-21 16:05.
-3. If clean and the user said "weiter": offer the four Next-intended-step
-   paths in 2 sentences each, wait for them to pick. Most likely they
-   want path 1 (Flutter Web real-world re-test) since v0.6 was built
-   for exactly that.
-4. Recent reflexion: v0.6 hardening came in ~50 min (4 features + tests
-   + docs + 1 bug fix on Dart records). Naive 60 min was a tight upper
-   bound; minute-unit calibration continues to hold.
+2. `git log -5 --oneline` and `git status -s` — drift detection.
+3. If user says "weiter" or "v0.6.3":
+   - Read `gesture_dart.ts` to scope the reflection rewrite.
+   - Start with one gesture (tap) → reflection-port → live-demo
+     against tester app on macOS (the proven setup).
+   - If green, port the other three (enter_text, wait_for_widget,
+     geometry) in sequence.
+4. Recent calibration: v0.6.0 + v0.6.1 + v0.6.2 came in ~90 min of work
+   across three commits. Path A estimate of 60-90 min is consistent
+   with that velocity.
