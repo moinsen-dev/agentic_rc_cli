@@ -1,18 +1,16 @@
 # Dart VM Service `evaluate` — what it won't compile
 
-The `evaluate` RPC is the central tool for any code we inject into a
-running Flutter app. It's not just "Dart with current scope" — there are
-non-obvious constraints that the spec doesn't mention. Both bit us
-hard; both have workarounds.
+The `evaluate` RPC backs our `rc_flutter_eval` tool. It's not just "Dart
+with current scope" — there are non-obvious constraints that the spec
+doesn't mention. Each of these bit us at least once during the build of
+the v0.6 gesture tools (since removed in v0.7) and still applies to any
+agent / tool author writing eval expressions today.
 
 ## Constraint 1 — single-line expressions only
 
 The frontend compiler that backs `evaluate` rejects multi-line strings
 outright with **RPC error 113 "Expression compilation error"**. Same
 source, same parser, but newlines fail.
-
-Verified empirically with [`scripts/eval-debug.mjs`](../../scripts/eval-debug.mjs)
-phase 4:
 
 ```dart
 // passes
@@ -25,11 +23,9 @@ phase 4:
 })()
 ```
 
-**Workaround:** the `singleLine()` helper in
-[`src/flutter/gesture_dart.ts`](../../src/flutter/gesture_dart.ts) runs
-`.replace(/\s+/g, " ").trim()` on every generated expression before
-sending. Authors write multi-line templates for readability; the helper
-collapses them. Don't bypass it.
+**Workaround:** if you generate expressions programmatically, collapse
+internal whitespace with `s.replace(/\s+/g, " ").trim()` before
+sending. If you're typing eval calls by hand, just keep it on one line.
 
 ## Constraint 2 — `@visibleForTesting` methods are blocked
 
@@ -42,42 +38,35 @@ Confirmed blocked:
 - `WidgetsBinding.instance.hitTestInView(...)`
 - Anything in `flutter_test`
 
-**Workaround for gestures:** don't dispatch synthetic pointer events.
-Walk to the nearest interactive widget (FAB / ElevatedButton /
-GestureDetector / InkWell / ListTile / …) and call its callback
-directly. Implemented in `TAPPABLE_SCAN` snippet of `gesture_dart.ts`.
+This is the structural reason we don't ship gesture / hit-test tools
+any more — eval can't reach the APIs that would make them work
+correctly. Use [Marionette MCP](https://pub.dev/packages/marionette_mcp)
+for those: it runs INSIDE the app with a tiny binding, and the
+`@visibleForTesting` filter doesn't apply at runtime.
 
-**Workaround for text input:** don't synthesise keyboard events. Walk
-to the `EditableText` and mutate `widget.controller.text` directly.
-Implemented in `buildEnterTextExpression`.
-
-The semantic difference vs the "real" path:
-- No ripple / press animation
-- No GestureRecognizer state-machine transitions
-- For text input: cursor stays at end of text, no IME composition
-
-For **behavioural verification** these don't matter. For animation /
-visual tests they would — but we're not in that game.
+For our remaining read-only `rc_flutter_eval`, just stay out of the
+test APIs and you're fine.
 
 ## Constraint 3 — eval runs on the main isolate's event loop
 
-Eval doesn't pause the isolate. If you call eval while the framework
-is mid-frame, your expression *can* run inside `Element.update` etc.
-A mutation that fires `notifyListeners` then triggers `setState` from
-within a build → "setState during build" assertion → Flutter's error
-reporter blows up on parsing the eval's anonymous stack frame.
+Eval doesn't pause the isolate. If your expression has side effects
+(mutations that fire `notifyListeners`, listeners that call `setState`),
+it can run inside `Element.update` and trigger "setState during build"
+assertions. Flutter's error reporter then asserts on parsing the eval's
+anonymous stack frame, and you get an opaque crash.
 
-See [`framework-rebuild-pacing.md`](framework-rebuild-pacing.md) for the
-mitigation pattern.
+This is one more reason `rc_flutter_eval` is positioned as
+**read-only inspection**: `WidgetsBinding.instance.framesEnabled`,
+`MyApp.someGlobal.toString()`, `1+1`. Don't mutate.
 
 ## Constraint 4 — Dart 3 record types are rejected
 
 Annotations like `({void Function() cb, String name})?` (Dart 3 named
 records) cause RPC 113 "Expression compilation error". The eval
-frontend is lagging Dart 3's syntax even on a Flutter 3.44 / Dart 3.12
+frontend lags Dart 3's syntax even on a Flutter 3.44 / Dart 3.12
 toolchain.
 
-**Workaround:** use plain `List<dynamic>` 2-tuples.
+**Workaround:** plain `List<dynamic>` 2-tuples.
 
 ```dart
 // Don't:
@@ -88,26 +77,21 @@ List? checkTappable(Widget x) {                                  // [cb, name]
   if (x is FloatingActionButton && x.onPressed != null) {
     return [x.onPressed!, "FloatingActionButton.onPressed"];
   }
-  // …
   return null;
 }
-// Caller:
 final hit = checkTappable(w);
-if (hit != null) {
-  (hit[0] as void Function())();
-  print("called: " + hit[1].toString());
-}
+if (hit != null) (hit[0] as void Function())();
 ```
 
 `List` is `List<dynamic>` (always allowed); casting at the call site
-is mildly verbose but compiles. Discovered while building the
-descendant-first walker for v0.6.
+is mildly verbose but compiles. Discovered while building the v0.6
+descendant-first walker.
 
 ## Constraint 5 — root library may not import the framework
 
 Eval expressions compile in the scope of a target Library (the `targetId`
 parameter). The intuitive default — `isolate.rootLib` — works on macOS,
-iOS, Android desktop because Flutter's bootstrap there is the user's
+iOS, Android because Flutter's bootstrap there is the user's
 `main.dart`, which `import 'package:flutter/material.dart'`. So
 `Element`, `WidgetsBinding`, `FloatingActionButton` etc. all resolve.
 
@@ -125,35 +109,33 @@ void main() async {
 No framework import in scope. Every eval that references `Element`
 fails with RPC 113.
 
-**Workaround:** in `FlutterService.evalTargetLibraryId()` we probe each
-candidate library with the bare identifier `Element`. Order:
+**Workaround (already shipped in [`flutter_service.ts`](../../src/flutter/flutter_service.ts)
+`evalTargetLibraryId()`):** probe each candidate library with the bare
+identifier `Element`. Order:
 `rootLib` → `package:flutter/material.dart` → `widgets.dart` →
-`cupertino.dart`. The first library where `Element` compiles wins, and
-is cached for the session. macOS keeps using rootLib; Web transparently
-falls back to material.dart.
-
-The diagnostic surface exposes which library is currently active via
-`evalTargetLibraryUri` (visible in tool results via the future
-`eval_target_lib` field).
+`cupertino.dart`. The first library where `Element` resolves wins, and
+is cached for the session. macOS uses rootLib; Web transparently falls
+back to material.dart. Important: the `evaluate` RPC does **not** throw
+on compile errors — it returns `{type: "@Error", message: "…"}`, so the
+probe code inspects the response shape, not just try/catch.
 
 ## Diagnostic technique
 
-`scripts/eval-debug.mjs` is the canonical bisection tool — when a new
-expression fails, copy-paste it in, narrow the failing piece by halving.
-Phase 1 (basic API access), Phase 2 (binding/dispatch), Phase 3
-(complex IIFE shapes), Phase 4 (whitespace) — successively-zoomed
-probes already exist; pattern them.
+When a new eval expression fails:
 
-When extending `gesture_dart.ts` and the new expression fails:
-1. Print the generated string (`console.log(buildXyzExpression(…))`).
-2. Paste into `eval-debug.mjs` `tryEval(…)` to see VM service's actual
-   error message.
-3. Bisect: halve, retry, halve again.
+1. Print the literal expression that's being sent.
+2. Run it by hand via `rc_flutter_eval` and read the surfaced
+   `eval_kind` + `eval_error` fields — the universal-diagnostic helper
+   exposes the VM service's actual error message instead of swallowing
+   it to `reason: "empty"`. See
+   [`eval-diagnostic-discipline.md`](eval-diagnostic-discipline.md).
+3. Bisect: comment out half the expression, retry, halve again until
+   you isolate the offending identifier or syntax.
 
 ## Tagged-string return convention
 
-Eval's `valueAsString` is a single string — we encode structured results
-with a tag prefix (`called:…`, `set:…`, `not_found`, `geom:…`, …) and
-parse on the TypeScript side. Don't return JSON-as-string; the eval
-escape rules will bite you. The tag-prefix convention is the contract
-between `buildXyzExpression` and `parseXyzResult` in gesture_dart.ts.
+`valueAsString` is a single string per eval call. If you want
+structured returns, encode them with a tag prefix (`set:`, `geom:`,
+`not_found`, …) and parse on the JS side. Don't return JSON-as-string;
+the eval escape rules will bite you (mostly the `$` interpolation
+ambiguity).

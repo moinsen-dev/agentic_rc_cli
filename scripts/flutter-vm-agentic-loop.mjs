@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 /**
- * Full agentic Flutter loop — proves the VM-service integration end to end:
+ * Full non-invasive Flutter observability loop — proves the VM-service
+ * integration end to end:
  *
  *   1. rc_start flutter run -d macos
  *   2. rc_flutter_endpoints (wait for URLs)
  *   3. rc_flutter_connect (open VM-service WS + subscribe to streams)
  *   4. rc_flutter_eval "1+1" — confirm two-way comms
  *   5. inject a synthetic build-time exception into main.dart
- *   6. rc_flutter_hot_reload   ← programmatic, structured result
+ *   6. rc_flutter_hot_reload   ← structured result
  *   7. rc_flutter_drain_errors ← MUST see the exception (count > 0)
  *   8. restore main.dart, hot-reload again
  *   9. rc_flutter_drain_errors ← MUST be empty (count === 0)
- *  10. rc_flutter_screenshot save_to=/tmp/agentic-rc-final.png
- *  11. send 'q', wait for clean exit
+ *  10. send 'q', wait for clean exit
  *
  * Cleans up main.dart in a finally block so the project is left untouched.
+ *
+ * For UI INTERACTION tests (tap, scroll, text input, screenshots), use
+ * Marionette MCP — see README.md.
  */
 import { spawn } from "node:child_process";
 import {
@@ -23,7 +26,6 @@ import {
   copyFileSync,
   unlinkSync,
   existsSync,
-  statSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -33,7 +35,6 @@ const serverEntry = join(here, "..", "dist", "index.js");
 const flutterCwd = join(here, "..", "flutter_example");
 const mainDart = join(flutterCwd, "lib", "main.dart");
 const mainDartBak = mainDart + ".agentic-bak";
-const screenshotPath = "/tmp/agentic-rc-final.png";
 
 function injectException() {
   const original = readFileSync(mainDart, "utf8");
@@ -251,26 +252,7 @@ async function main() {
     console.log("  ✅ clean — bug fixed and verified via VM service");
   }
 
-  // 9. screenshot
-  console.log(`→ rc_flutter_screenshot save_to=${screenshotPath}`);
-  try {
-    const shotResult = unwrap(
-      await send("tools/call", {
-        name: "rc_flutter_screenshot",
-        arguments: { session_id: sid, save_to: screenshotPath },
-      }),
-    );
-    if (shotResult.saved_to && existsSync(shotResult.saved_to)) {
-      const size = statSync(shotResult.saved_to).size;
-      console.log(`  ✅ saved ${size} bytes to ${shotResult.saved_to}`);
-    } else {
-      console.log(`  ${JSON.stringify(shotResult)}`);
-    }
-  } catch (err) {
-    console.log(`  ⚠️  screenshot failed: ${err.message}`);
-  }
-
-  // 10. quit
+  // 9. quit
   console.log("→ rc_send_keys 'q' (quit)");
   await send("tools/call", {
     name: "rc_send_keys",
@@ -291,7 +273,7 @@ async function main() {
     await sleep(500);
   }
 
-  console.log("\n=== AGENTIC LOOP PASSED ===");
+  console.log("\n=== OBSERVABILITY LOOP PASSED ===");
 }
 
 main()
@@ -303,7 +285,7 @@ main()
   .catch((err) => {
     restoreMainDart();
     child.kill("SIGKILL");
-    console.error("\n=== AGENTIC LOOP FAILED ===");
+    console.error("\n=== OBSERVABILITY LOOP FAILED ===");
     console.error(err);
     process.exit(1);
   });

@@ -1,96 +1,117 @@
 # agentic-rc-mcp
 
-> **An MCP server that turns an AI agent into an autonomous operator of
-> interactive local programs.** Spawn `flutter run`, `npm run dev`, REPLs,
-> TUIs — then *drive*, *observe*, *introspect*, and *quit* them through
-> structured tool calls. No human in the loop pressing `r`, copy-pasting log
-> excerpts, or reading the Dart VM Service URL off the terminal.
+> **An MCP server for non-invasive remote control + structured observability
+> of long-running interactive local processes.** Spawn `flutter run`,
+> `npm run dev`, REPLs, TUIs — drive them with keystrokes, read the rendered
+> screen, wait for patterns, capture errors and logs as **structured events**.
+> No human in the loop pressing `r` or copy-pasting log excerpts.
+> No code changes required in the controlled program.
 
-[**22 MCP tools**](#tool-reference) · 64 unit tests · 6 live-driven demo scripts ·
-Claude Code skill bundled · v0.6.0 real-world hardened.
+[**14 MCP tools**](#tool-reference) · 25 unit tests · 3 live-driven demo scripts ·
+Claude Code skill bundled · v0.7.0 focused on its strengths.
 
 ---
 
-## The problem
+## The strict scope of this tool
 
-When you tell Claude Code "run my app and verify the new feature works", today
-it gets stuck in the same place every time:
+`agentic-rc-mcp` is **not** an agentic UI testing framework. We tried in
+v0.6 — gestures, widget tree introspection, text input, screenshots —
+and concluded that **[Marionette MCP](https://pub.dev/packages/marionette_mcp)
+does that job better** because it runs INSIDE the Flutter app with a tiny
+binding and gets the framework's real `GestureBinding`, hit-test pipeline,
+custom-widget configuration, and multi-touch. We removed our gesture /
+inspector / text-input tools in v0.7 to stay focused on what's genuinely
+ours.
+
+| If you need… | Use… |
+|---|---|
+| **Tap / scroll / text input / screenshots in a running Flutter app** | [Marionette MCP](https://pub.dev/packages/marionette_mcp) (requires `marionette_flutter` package + one binding line in `main.dart`) |
+| **Drive any interactive CLI process (start, send keys, read screen, wait, stop)** | This tool ✓ |
+| **Capture Flutter / Dart exceptions as structured events instead of grepping** | This tool ✓ |
+| **Auto-discover the Dart VM Service URL from `flutter run`** | This tool ✓ |
+| **Hot-reload Flutter and get a typed `{success, libraries_reloaded, duration_ms}` result** | This tool ✓ |
+| **Read-only Dart expression eval against the live app** | This tool ✓ |
+| **Pixel-level clicks in non-Flutter GUIs (Electron, native Cocoa, browser)** | [Peekaboo](https://github.com/steipete/Peekaboo) or [`chrome-devtools-mcp`](https://github.com/cnove/chrome-devtools-mcp) |
+
+## The problem we DO solve
+
+When you tell Claude Code "run my app and watch for errors", today
+without help it gets stuck:
 
 1. It spawns the process in the background. ✅
 2. It tails the log a few times. ✅
 3. The log stops scrolling. **It can't tell if the app is *ready* or
-   *deadlocked*.** Asks you.
-4. To trigger hot-reload it has to press `r`. **It can't.** Asks you to press
-   it and paste what happened.
-5. Something crashes. The full exception is somewhere in 5000 lines of scroll.
-   **It has to grep, guess where the error block ends, hope it didn't miss
-   anything.**
-6. The bug is "the counter Text widget doesn't show the right value". The
-   agent can't *see* the widget. It can only re-read the source code and
-   guess. **It has no introspection.**
+   *deadlocked*.**
+4. To trigger a quit / hot-reload it has to press `q` / `r` in the
+   terminal. **It can't.**
+5. Something crashes. The full exception is somewhere in 5000 lines of
+   scroll. **It has to grep, guess where the error block ends, hope it
+   didn't miss anything.**
+6. The Dart VM Service URL is buried in the output. **It has to read it
+   manually and paste it.**
 
-`agentic-rc-mcp` removes every one of those blockers.
+`agentic-rc-mcp` removes every one of those blockers — for **any**
+interactive program, without requiring any modification to that program.
 
-## What you get — three layers
+## What you get — two layers
 
-| Layer | What it does | Why it matters |
+| Layer | What it does | Tools |
 |---|---|---|
-| **1. PTY control** (8 tools) | Spawn programs in a real pseudo-terminal. Send keys (`<Enter>`, `<Tab>`, `<C-c>`, …). Read the rendered screen — including TUIs like Flutter, vim, top. Wait for patterns with timeout. | The agent can press `r`, see what changed, know when "ready" appeared — exactly like a human at the terminal. |
-| **2. Flutter / Dart-VM lifecycle** (7 tools) | Auto-detect the VM-service WebSocket URL from `flutter run`'s output. Open a programmatic connection. Trigger hot-reload with a structured `{success, duration_ms}` result. Subscribe to Stdout / Stderr / Logging / Extension / Debug streams. Evaluate Dart in the live app. Capture screenshots. | No more grep-the-console for `Exception caught` — exceptions arrive as **structured events** with file:line, widget name, stack trace. No copy-pasting Debug URLs. |
-| **3. Flutter inspector** (3 tools) | Fetch the live widget tree as JSON with source locations. Search by `Key`, runtime type, description substring, or source file. Read any widget's properties — colour, alignment, text content, callback bindings. | The agent can *see* the UI structurally without a screenshot. "Find the FAB" → `valueId`. "What does the counter Text say?" → `data: "You have pushed the button this many times:"`. |
+| **1. PTY remote control** | Spawn programs in a real pseudo-terminal. Send keys (`<Enter>`, `<Tab>`, `<C-c>`, …). Read the rendered screen — including TUIs like Flutter, vim, top. Wait for patterns with timeout. Resize PTY. Clean shutdown via signals. | 8 |
+| **2. Flutter / Dart-VM observability** | Auto-detect the VM-service WebSocket URL from `flutter run`'s output. Open a programmatic connection. Subscribe to Stdout / Stderr / Logging / Extension / Debug streams — exceptions arrive as **structured events**. Trigger hot-reload with a typed result. Read-only eval Dart in the live app. | 6 |
 
-The three layers compose: at the bottom you can still `rc_send_keys("r")` for
-anything; at the top you can `rc_flutter_widget_find({by: "key", value: "submit"})`
-and get back an exact widget reference in milliseconds. Same MCP server, one
-session ID flowing through all of it.
+Both layers are non-invasive: the controlled program doesn't have to do
+anything special to be driven. Spawn it the way you'd spawn it from a
+terminal, and the MCP server takes it from there.
 
 ## Architecture
 
 ```
-+------------------+   stdio    +────────────────────── agentic-rc-mcp ──────────────────────+
-|  Claude Code     | <-------> |                                                              |
-|  (MCP client)    |  JSON-RPC |   ┌─ SessionManager ─────────────────────────────────────┐  |
-+------------------+           |   │   id → Session                                       │  |
-                               |   └──────────┬──────────────────────────────────────────┘  |
-                               |              │ owns                                          |
-                               |   ┌─ Session ▼─────────────────────────────────────────┐    |
-                               |   │                                                    │    |
-                               |   │   ┌───── PTY layer ──────┐                          │    |
-                               |   │   │  node-pty <══>       │ ──→ child process        │    |
-                               |   │   │  @xterm/headless     │     (flutter / vite / …) │    |
-                               |   │   │  + raw ring buffer   │                          │    |
-                               |   │   └──────────┬───────────┘                          │    |
-                               |   │              │ feeds                                 │    |
-                               |   │   ┌──── Endpoint sniffer ─────────────────────────┐ │    |
-                               |   │   │ regex over PTY output → ws / http / devtools │ │    |
-                               |   │   └──────────┬───────────────────────────────────┘ │    |
-                               |   │              │ unblocks                               │   |
-                               |   │   ┌──── VmServiceClient ──── WS ─────► Dart VM       │   |
-                               |   │   │   getVM, evaluate,                                │   |
-                               |   │   │   streamListen(Stderr,                            │   |
-                               |   │   │   Extension, Debug, …)                            │   |
-                               |   │   └──────────┬─────────────────                       │   |
-                               |   │              │ wraps                                   │   |
-                               |   │   ┌──── FlutterService ────┐  ─── ext.flutter.* ───►   │   |
-                               |   │   │  error buffer, logs,    │  ext.flutter.inspector.* │   |
-                               |   │   │  hot-reload, eval,      │                          │   |
-                               |   │   │  screenshot, inspector  │                          │   |
-                               |   │   └─────────────────────────┘                          │   |
-                               |   └───────────────────────────────────────────────────────┘   |
-                               +───────────────────────────────────────────────────────────────+
++------------------+   stdio    +───────── agentic-rc-mcp ──────────────+
+|  Claude Code     | <-------> |                                         |
+|  (MCP client)    |  JSON-RPC |   ┌─ SessionManager ─────────────────┐ |
++------------------+           |   │   id → Session                   │ |
+                               |   └──────────┬──────────────────────┘ |
+                               |              │ owns                    |
+                               |   ┌─ Session ▼────────────────────────┐|
+                               |   │  ┌─── PTY layer ───┐               │|
+                               |   │  │ node-pty <══>   │ ──→ child     │|
+                               |   │  │ @xterm/headless │   process     │|
+                               |   │  │ + raw ring buf  │   (flutter,   │|
+                               |   │  └────────┬────────┘   vite, …)    │|
+                               |   │           │ feeds                   │|
+                               |   │  ┌── Endpoint sniffer ──────────┐  │|
+                               |   │  │ regex over PTY output →      │  │|
+                               |   │  │ ws / http / devtools URL     │  │|
+                               |   │  └──────────┬───────────────────┘  │|
+                               |   │             │ unblocks              │|
+                               |   │  ┌── VmServiceClient ── WS ──► Dart VM
+                               |   │  │  getVM, evaluate (read-only), │  │|
+                               |   │  │  streamListen(Stderr,         │  │|
+                               |   │  │  Extension, Debug, Logging)   │  │|
+                               |   │  └──────────┬────────────────────┘ │|
+                               |   │             │ wraps                  │|
+                               |   │  ┌── FlutterService ──────────────┐ │|
+                               |   │  │  error/log ring buffers,        │ │|
+                               |   │  │  hot-reload, eval, library      │ │|
+                               |   │  │  probe for eval scope          │ │|
+                               |   │  └────────────────────────────────┘ │|
+                               |   └────────────────────────────────────┘|
+                               +────────────────────────────────────────+
 ```
 
 - **PTY:** real pseudo-terminal via `node-pty`, so the child program thinks
   it's interactive (`isatty(0)==1`).
 - **Screen rendering:** `@xterm/headless` runs xterm.js without a DOM,
-  applying ANSI/curses sequences and exposing the rendered viewport
-  programmatically — so TUIs like Flutter, vim, top render correctly.
-- **Endpoint sniffer:** parses every chunk of Flutter output for the four
-  forms Flutter prints (Chrome / macOS desktop / iOS / Android each emit
-  different strings). When the WS URL isn't printed explicitly it's
-  synthesised from the DevTools URL's `?uri=` query param or the HTTP URL.
-- **VM-service client:** JSON-RPC 2.0 over WebSocket. Used for everything
-  that isn't a keystroke or screen-read.
+  applying ANSI/curses sequences and exposing the rendered viewport — so
+  TUIs like Flutter, vim, top render correctly.
+- **Endpoint sniffer:** parses PTY output for the four URL forms Flutter
+  emits per device (Chrome / macOS / iOS / Android). When the WS URL isn't
+  printed explicitly it's synthesised from the DevTools URL's `?uri=`
+  query param or the HTTP URL.
+- **VM-service client:** JSON-RPC 2.0 over WebSocket. Read-only eval +
+  stream subscriptions only. For agentic UI interaction use Marionette
+  MCP instead.
 
 ## Tool reference
 
@@ -107,57 +128,16 @@ session ID flowing through all of it.
 | `rc_stop`        | Terminate a session. SIGTERM → 2 s grace → SIGKILL. |
 | `rc_resize`      | Change cols/rows of a running PTY. |
 
-### 2. Flutter / Dart-VM lifecycle tools
+### 2. Flutter / Dart-VM observability tools
 
 | Tool | Does |
 | --- | --- |
-| `rc_flutter_endpoints`    | Returns sniffed WS / HTTP / DevTools URLs (auto-synthesised on macOS desktop where Flutter omits the WS line). |
-| `rc_flutter_connect`      | Opens the VM-service WebSocket + subscribes to Stdout / Stderr / Logging / Extension / Debug. Idempotent. |
+| `rc_flutter_endpoints`    | Returns sniffed WS / HTTP / DevTools URLs (auto-synthesised on macOS desktop / Flutter Web where the explicit WS line is absent). |
+| `rc_flutter_connect`      | Opens the VM-service WebSocket + subscribes to Stdout / Stderr / Logging / Extension / Debug. Idempotent. Probes for a library scope where `Element` resolves (handles the Flutter Web `web_entrypoint.dart` quirk). |
 | `rc_flutter_drain_errors` | Returns + clears **structured** exception events. Use this instead of grepping the console. |
 | `rc_flutter_drain_logs`   | Returns + clears structured log events. |
-| `rc_flutter_hot_reload`   | Triggers `r`, parses Flutter's report into `{success, libraries_reloaded, duration_ms}` or `{success:false, reason, console_excerpt}`. |
-| `rc_flutter_eval`         | Run arbitrary Dart in the root library scope of the main isolate. |
-| `rc_flutter_screenshot`   | PNG via `ext.flutter.screenshot`. Graceful `extension_not_registered` fallback on macOS desktop — pair with Peekaboo for that platform. |
-
-### 3. Flutter inspector tools (agentic UI introspection)
-
-| Tool | Does |
-| --- | --- |
-| `rc_flutter_widget_tree`       | Fetch live widget hierarchy as JSON. **Defaults to user-code-only**: framework subtrees collapse to `{_elided:true, framework_node_count:N}` markers. Opts: `include_framework`, `source_prefix` (strict path filter), `flat:true` (returns list with ancestry paths instead of nested tree — saves ~70% tokens). |
-| `rc_flutter_widget_find`       | Search by `key` / `type` / `description` / `source_contains`. Returns matches with ancestry `path` and `valueId`. |
-| `rc_flutter_widget_properties` | Diagnostic properties of any widget by `valueId` — text content, padding, colour, callbacks (incl. closure name!), …. |
-
-### 4. Agentic gesture injection (tap & verify)
-
-This is where `agentic-rc-mcp` replaces Peekaboo and chrome-devtools-mcp for
-Flutter apps — both of which struggle with Flutter's custom-rendered canvas.
-We don't dispatch OS-level pointer events (the framework's
-`handlePointerEvent` is `@visibleForTesting` and the VM-service eval refuses
-to compile references to it). Instead the tap tool walks to the nearest
-interactive widget and **invokes its `onPressed` / `onTap` closure directly**
-— same `setState`, same rebuild, same side-effects, no GUI access needed.
-
-| Tool | Does |
-| --- | --- |
-| `rc_flutter_tap`             | Tap a widget by `key` / `type` / **`text`** / `value_id` / `coordinate`. Default walker order: **self → descendants → ancestors** (so custom wrappers like `TPKButton` around `TextButton` work). Detects ambiguous descendants and asks you to disambiguate. `descend:false` opts into the pre-v0.6 self → ancestors-only behaviour. |
-| `rc_flutter_widget_geometry` | Returns `{rect:{x,y,width,height}, widget_type}` for a matched widget — useful for layout verification. Supports `by:'text'`. |
-| `rc_flutter_wait_for_widget` | Block (with timeout) until a widget matching `{by, value}` appears (or disappears, with `appear:false`). Supports `by:'text'`. Bubbles up eval errors instead of polling silently. |
-| `rc_flutter_enter_text`      | **Fill a TextField / TextFormField.** Walks to the underlying `EditableText`, mutates its `TextEditingController.text` (so `onChanged` fires, validators run, listeners notify). Modes: `replace` (default), `append`, `clear`. Must-have for any login / form / search-bar flow — without this the agent can't get past an auth gate. |
-
-**Diagnostic discipline (v0.6+):** every gesture tool result now carries
-`eval_ok` / `eval_kind` / `eval_error` / `expression_preview` so a failure
-tells you **why** — `eval_kind:"@Error"` with a Dart compile error is
-acted upon differently than `eval_kind:"@Instance"` with
-`reason:"no_callback_found"`. See
-[`docs/learnings/eval-diagnostic-discipline.md`](docs/learnings/eval-diagnostic-discipline.md).
-
-The composition that makes this powerful: `rc_flutter_enter_text` to fill,
-`rc_flutter_tap` to submit, `rc_flutter_widget_find` +
-`rc_flutter_widget_properties` to **verify the state change**. End-to-end
-behavioural testing entirely through MCP. See
-[`scripts/flutter-tap-demo.mjs`](scripts/flutter-tap-demo.mjs) — 7
-synthetic taps on the counter app's FAB, each verified by re-reading the
-Text widget's `data` property (0 → 7).
+| `rc_flutter_hot_reload`   | Sends `r` over PTY (Flutter's own pipeline), parses the report into `{success, libraries_reloaded, duration_ms}` or `{success:false, reason, console_excerpt}`. |
+| `rc_flutter_eval`         | Read-only Dart expression eval against the live app. Surfaces `eval_kind` + `eval_error` on failure so compile / runtime errors are diagnosable. For driving UI interactions, use Marionette MCP. |
 
 ## Install
 
@@ -194,7 +174,7 @@ into an existing one):
 ```
 
 Restart Claude Code. The tools appear as `mcp__agentic-rc__rc_start`,
-`mcp__agentic-rc__rc_flutter_widget_find`, etc. See
+`mcp__agentic-rc__rc_flutter_drain_errors`, etc. See
 [`.mcp.json.example`](.mcp.json.example) for variants (direct dist path, dev
 mode via `tsx`).
 
@@ -202,8 +182,8 @@ mode via `tsx`).
 
 This repo ships a Claude Code skill at
 [`.claude/skills/agentic-rc/SKILL.md`](.claude/skills/agentic-rc/SKILL.md)
-that teaches Claude **when** to reach for each tool — the canonical Flutter
-agentic loop, the inspector pattern, named-key cheat sheet, platform gotchas.
+that teaches Claude **when** to reach for each tool and **when to redirect
+to Marionette MCP** for agentic UI testing.
 
 - **Project-local:** the skill is auto-loaded when you open Claude Code in
   this repo's directory.
@@ -217,7 +197,7 @@ agentic loop, the inspector pattern, named-key cheat sheet, platform gotchas.
 
   Idempotent — re-run after each `git pull`.
 
-## Example: the full agentic loop on a Flutter app
+## Example: drive `flutter run` and catch its exceptions
 
 ```jsonc
 // 1. Spawn the app — same as `flutter run` from the terminal.
@@ -225,75 +205,38 @@ rc_start { command: "flutter", args: ["run", "-d", "macos"],
            cwd: "/path/to/my-flutter-app" }
 // → { session_id: "8fa45718", pid: 79314 }
 
-// 2. Open the Dart VM Service — endpoints are auto-sniffed from the
-//    PTY output, no copy-pasting URLs.
+// 2. Open the Dart VM Service — endpoint auto-sniffed from PTY output.
+//    No copy-paste of debug URLs.
 rc_flutter_connect { session_id: "8fa45718", wait_ms: 180000 }
 // → { connected: true,
 //     ws_url: "ws://127.0.0.1:51658/hSQyXpnxQEo=/ws",
 //     main_isolate_id: "isolates/6257046507251003" }
 
 // 3. Edit a Dart file (regular Edit / Write tool — not part of this MCP),
-//    then trigger hot reload programmatically.
+//    then trigger hot reload + verify nothing broke.
 rc_flutter_hot_reload { session_id: "8fa45718" }
-// → { success: true, libraries_reloaded: 1, libraries_total: 753,
-//     duration_ms: 135 }
+// → { success: true, libraries_reloaded: 1, duration_ms: 135 }
 
-// 4. Did the new code throw? Get every exception as a structured event —
-//    no console scraping.
 rc_flutter_drain_errors { session_id: "8fa45718" }
 // → { count: 1, errors: [
 //     { timestamp: "2026-…", stream: "Extension",
 //       message: "EXCEPTION CAUGHT BY WIDGETS LIBRARY … main.dart:72:5 …" } ] }
 
-// 5. Introspect the live UI to see what's actually rendered.
-rc_flutter_widget_find { session_id: "8fa45718",
-                         by: "type", value: "FloatingActionButton" }
-// → { count: 1, matches: [
-//     { valueId: "inspector-11",
-//       path: "[root] > MyApp > … > FloatingActionButton",
-//       source_location: "lib/main.dart:115:29" } ] }
-
-// 6. Read the bound callback to confirm wiring.
-rc_flutter_widget_properties { session_id: "8fa45718",
-                               value_id: "inspector-11" }
-// → { properties: [
-//     { name: "onPressed",
-//       description: "Closure: () => void from Function '_incrementCounter@…'" },
-//     { name: "tooltip", description: "\"Increment\"" }, … ] }
-
-// 7. ACT — tap the button (no Peekaboo, no chrome-devtools, no GUI access).
-rc_flutter_tap { session_id: "8fa45718",
-                 by: "type", value: "FloatingActionButton" }
-// → { success: true, callback: "FloatingActionButton.onPressed" }
-//
-// The widget's onPressed closure runs directly. setState fires. Frame rebuilds.
-
-// 8. VERIFY — re-read the counter Text's `data` to confirm the state change.
-rc_flutter_widget_find { session_id: "8fa45718", by: "type", value: "Text",
-                         refresh: true }
-rc_flutter_widget_properties { session_id: "8fa45718",
-                               value_id: "<counter-text-valueId>" }
-// → { properties: [ { name: "data", description: "\"1\"" }, … ] }
-
-// 9. Run arbitrary Dart in the app's context.
+// 4. (optional) Read-only inspection of live state via Dart eval.
 rc_flutter_eval { session_id: "8fa45718",
                   expression: "WidgetsBinding.instance.framesEnabled" }
-// → { kind: "Instance", valueAsString: "true" }
+// → { kind: "Instance", valueAsString: "true",
+//     eval_target_lib: "<rootLib>" }
 
-// 10. Clean shutdown.
+// 5. Clean shutdown — send 'q' over PTY, or signal.
 rc_send_keys { session_id: "8fa45718", keys: "q" }
-//   …or fall back to a signal:
+//   …or:
 rc_stop { session_id: "8fa45718", wait_ms: 3000, remove: true }
 ```
 
-That sequence is exactly what
-[`scripts/flutter-inspector-demo.mjs`](scripts/flutter-inspector-demo.mjs),
-[`scripts/flutter-vm-agentic-loop.mjs`](scripts/flutter-vm-agentic-loop.mjs),
-and [`scripts/flutter-tap-demo.mjs`](scripts/flutter-tap-demo.mjs) run as
-end-to-end smoke tests against the sample
-[`flutter_example/`](flutter_example) counter app. The tap demo executes
-7 synthetic taps on the FAB and asserts the counter Text's `data` property
-transitions 0 → 7 — pure VM-service, no GUI access.
+For **interacting** with the running UI (tap, scroll, text input), pivot to
+Marionette MCP — see [its quick-start](https://pub.dev/packages/marionette_mcp).
+Both MCPs coexist happily in one `.mcp.json`.
 
 ## Named-key cheat sheet (`rc_send_keys`)
 
@@ -321,45 +264,40 @@ and send literal `<` / `>`.
   (Flutter, vim, top, `npm run dev` with spinners). You get what the user
   would *see* on the terminal right now.
 - **`rc_read_screen` with `mode: "scrollback"` or `"tail"`** — for the
-  history of what was rendered, post-curses processing. Best for log lines
-  that scrolled off the viewport.
+  history of what was rendered, post-curses processing.
 - **`rc_read_stream`** — for pure log-style apps (no cursor tricks) where
   you want every byte in order, with a cursor for incremental reads.
-- **`rc_flutter_drain_errors`** — once a session has VM-service errors going
-  this is **always preferred over PTY grepping**. You get structured events
-  with stream origin, timestamp, message, and the raw VM-service payload.
+- **`rc_flutter_drain_errors`** — once a session has VM-service connected
+  this is **always preferred over PTY grepping**. Structured events with
+  stream origin, timestamp, message, and the raw VM-service payload.
 
 ## Develop
 
 ```bash
-npm test               # vitest — 33 tests (keys, sessions, endpoints, inspector)
+npm test               # vitest — 25 tests (keys, sessions, endpoints)
 npm run typecheck      # strict tsc --noEmit
 npm run build          # emit dist/
 
 # Live end-to-end demo scripts (each drives a fresh MCP server over stdio):
-npm run smoke                                # 8 generic PTY tools
+npm run smoke                                # 14-tool list + generic PTY happy path
 node scripts/flutter-drive.mjs               # spawn flutter, hot-reload, quit
 node scripts/flutter-error-detect.mjs        # detect runtime exceptions via PTY
-node scripts/flutter-vm-agentic-loop.mjs     # full structured loop via VM service
-node scripts/flutter-inspector-demo.mjs      # widget-tree + find + properties
-node scripts/flutter-tap-demo.mjs            # 7 taps + assert counter 0 → 7
-node scripts/flutter-login-demo.mjs          # full login flow: enter email + pw, submit, verify
+node scripts/flutter-vm-agentic-loop.mjs     # full VM-service feature tour
 ```
 
-## What this is not (yet)
+## What this is not
 
+- **Not an agentic UI testing framework.** v0.6 tried (taps, gestures,
+  text input, widget tree); v0.7 removed those tools after a real-world
+  comparison with [Marionette MCP](https://pub.dev/packages/marionette_mcp)
+  showed they do it better with an in-app binding. We complement
+  Marionette — they handle interaction inside the app, we handle the
+  outside-the-app remote control + observability.
 - **Not network-remote.** Stdio only — MCP client and controlled processes
   run on the same machine. (Architecture is ready for it; just no transport
   written.)
 - **Not multi-user.** Single process, single session registry, no auth.
 - **No persistence.** Killing the MCP server kills every child it started.
-- **No pixel taps inside non-Flutter windows.** For **Flutter** apps we DO
-  fire onPressed/onTap directly via `rc_flutter_tap` — Peekaboo and
-  chrome-devtools-mcp are no longer needed. For other GUI apps (Electron,
-  native Cocoa, web) you still need an OS-level driver:
-  [Peekaboo](https://github.com/steipete/Peekaboo) or
-  [`chrome-devtools-mcp`](https://github.com/cnove/chrome-devtools-mcp) —
-  then drain errors via this MCP to see what your tap broke.
 - **No Windows yet.** node-pty supports ConPTY; untested with this code.
 
 ## License

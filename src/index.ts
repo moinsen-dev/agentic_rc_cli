@@ -28,38 +28,9 @@ import {
   flutterHotReloadInputSchema,
 } from "./tools/flutter/hot_reload.js";
 import { flutterEvalHandler, flutterEvalInputSchema } from "./tools/flutter/eval.js";
-import {
-  flutterScreenshotHandler,
-  flutterScreenshotInputSchema,
-} from "./tools/flutter/screenshot.js";
-import {
-  flutterWidgetTreeHandler,
-  flutterWidgetTreeInputSchema,
-} from "./tools/flutter/widget_tree.js";
-import {
-  flutterWidgetFindHandler,
-  flutterWidgetFindInputSchema,
-} from "./tools/flutter/widget_find.js";
-import {
-  flutterWidgetPropertiesHandler,
-  flutterWidgetPropertiesInputSchema,
-} from "./tools/flutter/widget_properties.js";
-import { flutterTapHandler, flutterTapInputSchema } from "./tools/flutter/tap.js";
-import {
-  flutterWidgetGeometryHandler,
-  flutterWidgetGeometryInputSchema,
-} from "./tools/flutter/widget_geometry.js";
-import {
-  flutterWaitForWidgetHandler,
-  flutterWaitForWidgetInputSchema,
-} from "./tools/flutter/wait_for_widget.js";
-import {
-  flutterEnterTextHandler,
-  flutterEnterTextInputSchema,
-} from "./tools/flutter/enter_text.js";
 
 const SERVER_NAME = "agentic-rc";
-const SERVER_VERSION = "0.6.1";
+const SERVER_VERSION = "0.7.0";
 
 export function buildServer(): McpServer {
   const server = new McpServer(
@@ -70,6 +41,11 @@ export function buildServer(): McpServer {
       },
     },
   );
+
+  // ─── Generic PTY remote control ────────────────────────────────────────
+  // Works on ANY interactive local program: flutter run, npm run dev, vite,
+  // REPLs, shells, TUIs. Non-invasive — does not require the controlled
+  // process to expose anything.
 
   server.registerTool(
     "rc_start",
@@ -159,11 +135,18 @@ export function buildServer(): McpServer {
     resizeHandler,
   );
 
-  // ─── Flutter-specific tools ────────────────────────────────────────────
-  // These work on top of any session whose process exposed a Dart VM Service
+  // ─── Flutter / Dart-VM observability (still non-invasive) ──────────────
+  // These work on any session whose process exposed a Dart VM Service
   // endpoint (`flutter run`, `dart run --observe`, etc.). They auto-detect
-  // the endpoint URL from the session's PTY output, then talk JSON-RPC to
-  // the VM service over WebSocket — no manual URL copying required.
+  // the endpoint URL from the session's PTY output and talk JSON-RPC to
+  // the VM service over WebSocket — no copy-paste of debug URLs needed,
+  // no code changes required in the app.
+  //
+  // For agentic UI INTERACTION (tap, enter text, swipe, screenshot,
+  // widget-tree introspection), use Marionette MCP instead — it requires a
+  // tiny app-side binding but in exchange gives real GestureBinding
+  // pointer events, hit-test filtering, custom-widget configuration, etc.
+  // See https://pub.dev/packages/marionette_mcp.
 
   server.registerTool(
     "rc_flutter_endpoints",
@@ -181,7 +164,7 @@ export function buildServer(): McpServer {
     {
       title: "Open a Dart VM Service WebSocket for the session",
       description:
-        "Connects to the Dart VM Service, subscribes to Stdout/Stderr/Logging/Extension/Debug streams (so subsequent rc_flutter_drain_errors / rc_flutter_drain_logs calls see events), and caches the connection. Idempotent — calling rc_flutter_hot_reload / rc_flutter_eval / rc_flutter_screenshot triggers this automatically.",
+        "Connects to the Dart VM Service, subscribes to Stdout/Stderr/Logging/Extension/Debug streams (so subsequent rc_flutter_drain_errors / rc_flutter_drain_logs calls see events), and caches the connection. Idempotent — calling rc_flutter_hot_reload / rc_flutter_eval triggers this automatically.",
       inputSchema: flutterConnectInputSchema,
     },
     flutterConnectHandler,
@@ -192,7 +175,7 @@ export function buildServer(): McpServer {
     {
       title: "Drain buffered Flutter error events",
       description:
-        "Returns + clears the queue of structured error events observed via the VM-service (Stderr, framework Flutter.Error events, WARNING-level Logging, paused-on-exception Debug events). Use this in the agent's after-action loop instead of grepping the console.",
+        "Returns + clears the queue of structured error events observed via the VM-service (Stderr, framework Flutter.Error events, WARNING-level Logging, paused-on-exception Debug events). Use this in any after-action loop instead of grepping the console.",
       inputSchema: flutterDrainErrorsInputSchema,
     },
     flutterDrainErrorsHandler,
@@ -203,7 +186,7 @@ export function buildServer(): McpServer {
     {
       title: "Drain buffered Flutter log events",
       description:
-        "Returns + clears the queue of structured log events (Stdout + Logging streams below WARNING). Lets the agent inspect app output without scrolling the PTY.",
+        "Returns + clears the queue of structured log events (Stdout + Logging streams below WARNING). Lets you inspect app output without scrolling the PTY.",
       inputSchema: flutterDrainLogsInputSchema,
     },
     flutterDrainLogsHandler,
@@ -225,105 +208,10 @@ export function buildServer(): McpServer {
     {
       title: "Evaluate a Dart expression in the running app",
       description:
-        "Runs an arbitrary Dart expression in the root library scope of the main isolate. Useful for inspecting state, computing values from live objects, calling debug helpers. Example: '1+1', 'WidgetsBinding.instance.framesEnabled', 'MyApp.someGlobal.toString()'.",
+        "Runs an arbitrary Dart expression in the main isolate. Used for read-only inspection of live state, computing values from in-memory objects, calling debug helpers. Example: '1+1', 'WidgetsBinding.instance.framesEnabled', 'MyApp.someGlobal.toString()'. Surfaces eval_kind + eval_error on failure so compile / runtime errors are diagnosable. For driving UI interactions, use Marionette MCP — eval-based gestures hit the @visibleForTesting wall.",
       inputSchema: flutterEvalInputSchema,
     },
     flutterEvalHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_screenshot",
-    {
-      title: "Capture a PNG screenshot of the Flutter window",
-      description:
-        "Captures the rendered Flutter scene via ext.flutter.screenshot. If `save_to` is given, writes the PNG to disk and returns the absolute path; otherwise returns the base64 data inline.",
-      inputSchema: flutterScreenshotInputSchema,
-    },
-    flutterScreenshotHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_widget_tree",
-    {
-      title: "Fetch the Flutter widget tree (summary) as JSON",
-      description:
-        "Calls ext.flutter.inspector.getRootWidgetSummaryTree and returns the live widget hierarchy as a trimmed JSON tree. Each node has { valueId, description, type, key, source_location, child_count, children }. Use this to understand the UI structure before interacting with it. Pass `refresh: true` after a hot-reload to bust the cache. Default `max_depth: 6` keeps the payload small.",
-      inputSchema: flutterWidgetTreeInputSchema,
-    },
-    flutterWidgetTreeHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_widget_find",
-    {
-      title: "Search the Flutter widget tree",
-      description:
-        "Finds widgets in the live tree by `key`, `type`, `description`, or `source_contains`. Returns an array of matches with `{valueId, type, description, key, source_location, path}`. Hand the `valueId` to rc_flutter_widget_properties for full attribute readout.",
-      inputSchema: flutterWidgetFindInputSchema,
-    },
-    flutterWidgetFindHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_widget_properties",
-    {
-      title: "Read a Flutter widget's properties",
-      description:
-        "Calls ext.flutter.inspector.getProperties on a widget id (use rc_flutter_widget_find to obtain one). Returns the widget's diagnostic properties — colour, padding, alignment, text content, etc. — exactly as Flutter DevTools shows them.",
-      inputSchema: flutterWidgetPropertiesInputSchema,
-    },
-    flutterWidgetPropertiesHandler,
-  );
-
-  // ─── Agentic interaction (gesture injection) ───────────────────────────
-  // These tools inject real pointer events through GestureBinding so the
-  // same hit-test path fires that the OS would trigger from a touch. Means
-  // a Claude agent can drive the running Flutter app end-to-end without
-  // Peekaboo or chrome-devtools-mcp — both of which work poorly with
-  // Flutter's custom-rendered canvas.
-
-  server.registerTool(
-    "rc_flutter_tap",
-    {
-      title: "Tap a Flutter widget (real pointer event)",
-      description:
-        "Injects a PointerDown+PointerUp pair into GestureBinding at the center of a target widget (or at given coordinates). The widget's onPressed / GestureDetector / InkWell fires exactly as if a human tapped — no Peekaboo or external automation needed. Identify via {by:'key', value:'submit-button'} / {by:'type', value:'FloatingActionButton'} / {by:'value_id', value:<from rc_flutter_widget_find>} / {by:'coordinate', x, y}.",
-      inputSchema: flutterTapInputSchema,
-    },
-    flutterTapHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_widget_geometry",
-    {
-      title: "Get the screen rect of a Flutter widget",
-      description:
-        "Returns {rect:{x,y,width,height}, widget_type} for the matched widget — useful for verifying layout or computing tap coordinates for adjacent widgets. Uses the same key/type/value_id matchers as rc_flutter_tap.",
-      inputSchema: flutterWidgetGeometryInputSchema,
-    },
-    flutterWidgetGeometryHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_wait_for_widget",
-    {
-      title: "Wait until a Flutter widget appears (or disappears)",
-      description:
-        "Polls the live element tree until a widget matching {by, value} appears (default) or disappears (`appear:false`). Use after navigation, after rc_flutter_tap, after a hot reload — any moment where you'd otherwise sleep blindly. Default timeout 10 s, default poll 200 ms.",
-      inputSchema: flutterWaitForWidgetInputSchema,
-    },
-    flutterWaitForWidgetHandler,
-  );
-
-  server.registerTool(
-    "rc_flutter_enter_text",
-    {
-      title: "Type text into a Flutter TextField / TextFormField",
-      description:
-        "Mutates the underlying TextEditingController so the field re-renders with the new content (onChanged fires, validators run, listeners notify). Walks down to the EditableText descendant so it works whether the caller passed a controller or not. Modes: 'replace' (default) overwrites; 'append' concatenates; 'clear' empties. This is the must-have for any login / form / search flow — without it the agent can't get past the auth gate.",
-      inputSchema: flutterEnterTextInputSchema,
-    },
-    flutterEnterTextHandler,
   );
 
   return server;

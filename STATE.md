@@ -1,161 +1,121 @@
 # STATE — agentic_rc_cli
 
-> **Frozen:** 2026-05-21 17:30 (Europe/Berlin)
+> **Frozen:** 2026-05-22 08:20 (Europe/Berlin)
 > **Branch:** develop
 > **Last commit:** `fd4d867` · fix(eval): probing must inspect response for @Error
-> **Version:** v0.6.2 published, v0.6.3 planning surfaced (see below)
+> **Version:** v0.7.0 staged (pivot), pre-commit
 
-## Last work-unit
+## Last work-unit — v0.7.0 pivot
 
-Shipped **v0.6.2** — probing-loop must inspect the evaluate-RPC response
-for `{type: "@Error"}`, not rely on try/catch alone. The VM-service
-`evaluate` RPC does NOT throw on compilation failures; it returns a
-normal response of shape `{type: "@Error", kind: "error", message: "…"}`.
-Pre-fix, the v0.6.1 probing loop's catch never fired, the first
-candidate (rootLib) always "won" silently and got cached even when its
-scope couldn't resolve `Element`. Every gesture tool then used the
-broken target.
+We **deleted the UI-interaction layer entirely**. After comparing v0.6.2
+empirically against [Marionette MCP](https://pub.dev/packages/marionette_mcp),
+the conclusion was unambiguous: Marionette's architectural choice (run
+inside the app via a tiny `MarionetteBinding` extending
+`WidgetsFlutterBinding`) gives it real `GestureBinding.handlePointerEvent`,
+hit-test filtering, custom-widget config, multi-touch, screenshots — all
+things we can never have through eval because of `@visibleForTesting` +
+the hub-library re-export problem documented in v0.6.x.
 
-Verified by direct VM-service test against the TPK Web Console
-session that reproduced the original problem.
+Rather than try to clone Marionette, we **doubled down on what's actually
+ours**: non-invasive remote control + structured observability.
 
-## ⚠️ But — fundamental architecture issue uncovered
+**Removed (8 tools + 11 files):**
 
-User then tried v0.6.2 against TWO Flutter targets (Web on Chrome AND
-macOS native) for the TesterPayKit Web Console (a real, non-trivial
-Flutter app with `moinsen_runapp` wrapper, GoRouter, Riverpod). Both
-failed at the probing stage with `eval_error: "No library in the
-running isolate has Element in scope. Probed: <rootLib>, material.dart,
-widgets.dart, cupertino.dart"`.
+- `rc_flutter_tap`, `rc_flutter_widget_geometry`, `rc_flutter_wait_for_widget`,
+  `rc_flutter_enter_text` (gesture / text-input)
+- `rc_flutter_widget_tree`, `rc_flutter_widget_find`,
+  `rc_flutter_widget_properties` (inspector)
+- `rc_flutter_screenshot` (Marionette has it natively)
+- Source: `src/flutter/gesture_dart.ts`, `src/flutter/inspector.ts`, 8
+  tool handlers in `src/tools/flutter/*.ts`
+- Tests: `test/gesture-dart.test.ts`, `test/inspector.test.ts`
+- Demos: `scripts/flutter-tap-demo.mjs`, `scripts/flutter-login-demo.mjs`,
+  `scripts/flutter-inspector-demo.mjs`, `scripts/eval-debug.mjs`
+- Learnings: `inspector-tree-keys.md`, `screenshot-availability.md`,
+  `framework-rebuild-pacing.md`
 
-Direct VM-service probe with `evaluate` RPC against each library
-confirmed:
+**Kept (14 tools):**
 
-- `package:flutter/material.dart` → `Element` undefined
-- `package:flutter/widgets.dart` → `Element` undefined
-- `package:flutter/cupertino.dart` → `Element` undefined
-- `package:flutter/src/widgets/framework.dart` → ✅ `Element` resolves
-- `package:flutter/src/widgets/binding.dart` → ✅ `WidgetsBinding` resolves
+- PTY layer (8): `rc_start`, `rc_send_keys`, `rc_read_screen`,
+  `rc_read_stream`, `rc_wait_for`, `rc_status`, `rc_stop`, `rc_resize`
+- Flutter/Dart-VM observability (6): `rc_flutter_endpoints`,
+  `rc_flutter_connect`, `rc_flutter_drain_errors`,
+  `rc_flutter_drain_logs`, `rc_flutter_hot_reload`, `rc_flutter_eval`
+  (read-only)
 
-**The hub libraries (material/widgets/cupertino) are pure re-exports.**
-Re-exports do NOT bring symbols into the host library's evaluate-scope.
-Only the source-file where a symbol is DIRECTLY declared has it in
-scope. The probing strategy was correct in concept but probed the
-wrong library URIs.
+**Docs rewritten:**
 
-**Worse:** even with `framework.dart` as targetId, our gesture-walker
-expressions still reference `FloatingActionButton`, `TextButton`,
-`GestureDetector`, etc. — those live in different source files.
-**No single library has all the framework types our walker uses in
-its evaluate-scope at the same time.**
+- README: explicit "we are not an agentic UI testing framework, use
+  Marionette for that, here is the boundary" framing up top
+- SKILL.md (project-local + global): "When to use this skill vs
+  Marionette MCP" section right after the intro; the canonical loop is
+  now the **observability** loop (rebuild → drain errors → fix), not a
+  UI interaction loop
+- CLAUDE.md: pruned learnings trigger map; added "what this repo is NOT"
+  section to prevent future drift back into UI testing
+- vm-service-eval-quirks.md + eval-diagnostic-discipline.md: kept and
+  re-pointed at `rc_flutter_eval` as the surviving eval-driven tool
 
-## Next intended step — v0.6.3 candidate paths
+**Gates:** typecheck ✅, 25/25 unit tests ✅, smoke (14 tools, generic
+PTY happy path) ✅. SERVER_VERSION 0.6.1 → 0.7.0.
 
-Two routes under consideration, neither trivial:
+## Next intended step
 
-### Path A — Reflection-based expression builder
+The pivot is done — the next moves are **stabilisation + user-facing**:
 
-Rewrite every eval expression in `gesture_dart.ts` to use
-`runtimeType.toString()` comparisons instead of `is` checks:
+1. **Push v0.7.0 + tag the cut.** Anything that uses the removed tools
+   externally will break loudly with `Unknown tool`. That's by design.
+2. **Re-run user's Flutter Web test session** with Marionette + this
+   tool together (the hybrid pattern documented in the new SKILL.md).
+   Validate that the boundary feels right in real use.
+3. **Optionally:** publish to npm under `@moinsen/agentic-rc-mcp` so
+   `npx` install works without the repo clone. ~15 min.
+4. **Optionally:** small CHANGELOG.md summarising v0.5 → v0.6 → v0.7
+   evolution including the pivot rationale. ~20 min.
 
-```dart
-// Before (needs FloatingActionButton in eval-scope):
-if (x is FloatingActionButton && x.onPressed != null) …
+## Open friction
 
-// After (needs only Widget + runtimeType comparison):
-if (x.runtimeType.toString() == 'FloatingActionButton') {
-  final cb = (x as dynamic).onPressed;
-  if (cb != null) …
-}
-```
-
-With this rewrite, `framework.dart` alone (which has `Element`,
-`Widget`, `RenderObject` directly) is enough for the full gesture
-walker. Loses static type safety inside the eval string, but the
-expression is already a string-constructed Dart fragment so there was
-no real static safety to begin with.
-
-Effort: ~60-90 min including unit-test regression + live-demo
-verification on both desktop and Web.
-
-### Path B — Migrate to `ext.flutter.inspector.*` service extensions
-
-Flutter's widget inspector exposes service extensions that don't need
-an evaluate-scope at all:
-
-- `ext.flutter.inspector.getRootWidgetSummaryTree` — already used.
-- `ext.flutter.inspector.getProperties` — already used.
-- `ext.flutter.inspector.getRenderObject` — gives us a RenderObject
-  ObjectId we can `getObject` on to read its size + position.
-- `ext.flutter.inspector.getLayoutExplorerNode` — even richer layout
-  info.
-
-For taps, no built-in service extension exists. Path B requires
-shipping a custom service extension as part of the SDK that an app
-opts into by `import 'package:agentic_rc_helpers/agentic_rc_helpers.dart'
-+ AgenticRcHelpers.register()` in main. Heavier on the app side but
-zero eval-scope dependency at the tool side.
-
-Effort: ~3-4 hours including the helper-package scaffold.
-
-### Recommended approach
-
-**Path A first**, then Path B as a v1.0 hardening. Path A is incremental
-on what's there; Path B is the eventual architecturally correct answer
-but adds a runtime dep for the consuming app.
-
-## Scope documented for users
-
-The `~/.claude/skills/agentic-rc/SKILL.md` has been trimmed to
-**Flutter process control + read-only introspection** as the
-recommended scope. The 4 eval-based interaction tools (tap,
-enter_text, wait_for_widget by:text, widget_geometry) are listed in
-an "⚠️ Experimental / known limitations" section at the bottom with
-the full architectural explanation and pointer to this STATE.md for
-the v0.6.3 plan.
-
-Net effect on agent behaviour: agents using the skill will no longer
-attempt to drive UI agentically on real apps and will default to
-`Peekaboo` / `chrome-devtools-mcp` for tap dispatch, with agentic-rc
-filling the introspection + drain_errors role.
-
-## Open friction (still relevant)
-
-- `rc_flutter_screenshot` `extension_not_registered` on macOS desktop.
-- `widget_find by=key` uses the cached inspector path that drops keys
-  on Text leaves (eval workaround in `docs/learnings/inspector-tree-keys.md`).
-- The 4 interaction tools listed above — covered in detail in the
-  v0.6.3 plan.
+- `rc_flutter_eval` is still subject to all 5 eval-scope constraints in
+  `vm-service-eval-quirks.md`. The library-probe handles the worst case
+  (Flutter Web `web_entrypoint.dart`) by falling back to material; for
+  user-app symbols that only resolve in `main.dart` scope, eval may fail
+  with `@Error`. That's acceptable: `rc_flutter_eval` is documented as
+  read-only inspection, not UI driving.
+- Sessions are tied to the MCP-server process. Killing Claude Code kills
+  all sessions (clean, no zombies).
+- No CHANGELOG yet; git log + this file is the only summary.
 
 ## Live context for the agent
 
-- **Active spec areas:**
-  [`src/flutter/gesture_dart.ts`](src/flutter/gesture_dart.ts) — needs
-  Path-A reflection rewrite,
-  [`src/flutter/flutter_service.ts`](src/flutter/flutter_service.ts) —
-  `evalTargetLibraryId()` probing list candidates (line 235-280)
-  also wants framework.dart added before material.dart for the
-  pre-Path-A case.
+- **Active spec areas:** none — v0.7.0 is steady-state. Any new tool
+  added here MUST be evaluated against "does Marionette already do
+  this?" before starting. If yes, redirect users; don't add it.
 - **Empirical Dart-eval constraints** captured in
-  [`docs/learnings/vm-service-eval-quirks.md`](docs/learnings/vm-service-eval-quirks.md):
-  single-line only, no `@visibleForTesting`, no Dart 3 records, hub
-  libraries don't bring re-exports into evaluate-scope (new Constraint #6
-  — needs adding).
-- **User-code-only widget tree by default** — pass
-  `include_framework:true` only when debugging framework wrappers.
-- **Demo discipline:** every new tool gets a live-driven script under
-  `scripts/`. Live verification is the truth, not the unit tests.
+  [`docs/learnings/vm-service-eval-quirks.md`](docs/learnings/vm-service-eval-quirks.md).
+  Apply when extending `rc_flutter_eval` or when an agent's eval call
+  fails.
+- **Forensic learnings retained:** `vm-service-eval-quirks.md`,
+  `flutter-hot-reload-pipeline.md`, `flutter-endpoint-sniffing.md`,
+  `eval-diagnostic-discipline.md`. The three removed (inspector-tree-keys,
+  screenshot-availability, framework-rebuild-pacing) were tool-specific
+  and went with their tools.
+- **Demo discipline:** the three remaining live demos
+  (`flutter-drive.mjs`, `flutter-error-detect.mjs`,
+  `flutter-vm-agentic-loop.mjs`) cover the kept tool surface. Run them
+  if you touch anything Flutter-side. `npm run smoke` covers PTY.
 
 ## How to resume
 
 1. Read this file.
-2. `git log -5 --oneline` and `git status -s` — drift detection.
-3. If user says "weiter" or "v0.6.3":
-   - Read `gesture_dart.ts` to scope the reflection rewrite.
-   - Start with one gesture (tap) → reflection-port → live-demo
-     against tester app on macOS (the proven setup).
-   - If green, port the other three (enter_text, wait_for_widget,
-     geometry) in sequence.
-4. Recent calibration: v0.6.0 + v0.6.1 + v0.6.2 came in ~90 min of work
-   across three commits. Path A estimate of 60-90 min is consistent
-   with that velocity.
+2. `git log -5 --oneline` and `git status -s` — drift check since
+   2026-05-22 08:20.
+3. **If the user asks about UI interaction / tap / scroll / text input
+   on Flutter**: point them at Marionette MCP. Don't add the tools back
+   here. Reference SKILL.md "When to use Marionette MCP instead".
+4. **If the user asks for a new generic remote-control feature** (new
+   PTY capability, new VM-service-stream subscription, new structured
+   observability surface): that's in scope. Build it.
+5. Recent calibration: v0.7.0 pivot — code deletion + doc rewrite +
+   verification — came in ~45 min wall-time. The empirical agent
+   velocity for a focused refactor with clear scope continues to be
+   under 1 hour.

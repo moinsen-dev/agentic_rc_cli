@@ -102,7 +102,7 @@ async function main() {
   const tools = await send("tools/list", {});
   const names = tools.tools.map((t) => t.name).sort();
   const expected = [
-    // Generic PTY tools (always present)
+    // Generic PTY tools
     "rc_read_screen",
     "rc_read_stream",
     "rc_resize",
@@ -111,27 +111,19 @@ async function main() {
     "rc_status",
     "rc_stop",
     "rc_wait_for",
-    // Flutter / Dart-VM tools (always registered, activate per session)
+    // Flutter / Dart-VM observability (no UI interaction — see Marionette MCP for that)
     "rc_flutter_connect",
     "rc_flutter_drain_errors",
     "rc_flutter_drain_logs",
     "rc_flutter_endpoints",
     "rc_flutter_eval",
     "rc_flutter_hot_reload",
-    "rc_flutter_screenshot",
-    "rc_flutter_widget_tree",
-    "rc_flutter_widget_find",
-    "rc_flutter_widget_properties",
-    "rc_flutter_tap",
-    "rc_flutter_widget_geometry",
-    "rc_flutter_wait_for_widget",
-    "rc_flutter_enter_text",
   ].sort();
   assert(
     JSON.stringify(names) === JSON.stringify(expected),
     `tools mismatch — got ${JSON.stringify(names)}`,
   );
-  console.log("OK tools/list:", names.length, "tools (8 generic + 14 flutter)");
+  console.log("OK tools/list:", names.length, "tools (8 generic + 6 flutter)");
 
   // 3. rc_start /bin/sh -i
   const startResult = await send("tools/call", {

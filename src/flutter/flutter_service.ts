@@ -3,16 +3,23 @@
  *
  * Methods exposed:
  *   - mainIsolateId()            — find the running Flutter app's main isolate
- *   - hotReload()                — programmatic hot reload (reload sources + reassemble)
- *   - evaluate(expression)       — run Dart in the main isolate's context
- *   - screenshot()               — base64 PNG of the rendered Flutter window
+ *   - evalTargetLibraryId()      — pick a library scope where framework types
+ *                                  resolve (handles the Flutter Web bootstrap
+ *                                  quirk where rootLib has no framework import)
+ *   - hotReload()                — Dart VM Service reloadSources + reassemble
+ *   - evaluate(expression)       — read-only Dart eval against the live app
  *   - errors buffer              — Stderr + Extension/Flutter.Error events get
- *                                  pushed into a bounded ring buffer and can be
- *                                  drained on demand by the agent.
+ *                                  pushed into a bounded ring buffer and can
+ *                                  be drained on demand.
  *   - logs buffer                — Stdout events, same ring-buffer pattern.
+ *
+ * NOTE: This service no longer ships a widget inspector or screenshot
+ * helper. Those concerns (and any kind of UI interaction — tap, scroll,
+ * text input) belong in Marionette MCP (https://pub.dev/packages/marionette_mcp),
+ * which runs INSIDE the app and has full framework access. We stay
+ * non-invasive — observation, not interaction.
  */
 import { VmServiceClient } from "./vm_service.js";
-import { WidgetInspector } from "./inspector.js";
 
 export interface FlutterErrorEvent {
   /** ISO timestamp when this client observed the event. */
@@ -79,20 +86,11 @@ export class FlutterService {
   private logBuffer: FlutterLogEvent[] = [];
   private unsubscribers: Array<() => void> = [];
   private subscribed = false;
-  private _inspector: WidgetInspector | null = null;
 
   constructor(private readonly client: VmServiceClient) {}
 
   get vmClient(): VmServiceClient {
     return this.client;
-  }
-
-  /** Lazy-initialised widget inspector for this session. */
-  get inspector(): WidgetInspector {
-    if (!this._inspector) {
-      this._inspector = new WidgetInspector(this.client, () => this.mainIsolateId());
-    }
-    return this._inspector;
   }
 
   async ensureSubscribed(): Promise<void> {
@@ -124,9 +122,14 @@ export class FlutterService {
       this.client.onEvent("Logging", (ev) => {
         const rec = ev.event["logRecord"] as Record<string, unknown> | undefined;
         if (!rec) return;
-        const message = typeof rec.message === "object" ? JSON.stringify(rec.message) : String(rec.message ?? "");
+        const message =
+          typeof rec.message === "object" ? JSON.stringify(rec.message) : String(rec.message ?? "");
         const level = typeof rec.level === "number" ? rec.level : 0;
-        const entry: FlutterLogEvent = { stream: "Logging", message, timestamp: new Date().toISOString() };
+        const entry: FlutterLogEvent = {
+          stream: "Logging",
+          message,
+          timestamp: new Date().toISOString(),
+        };
         this.logBuffer.push(entry);
         if (this.logBuffer.length > LOG_BUFFER_LIMIT) {
           this.logBuffer.shift();
@@ -180,10 +183,7 @@ export class FlutterService {
     }
   }
 
-  /**
-   * Return + clear the buffered errors. Use this as the agent's "did anything
-   * go wrong since I last looked?" loop step.
-   */
+  /** Return + clear the buffered errors. */
   drainErrors(): FlutterErrorEvent[] {
     const out = this.errorBuffer;
     this.errorBuffer = [];
@@ -216,21 +216,14 @@ export class FlutterService {
    *
    * BUT Flutter Web sets the rootLib to a generated bootstrap
    * (`web_entrypoint.dart`) that does NOT import the framework directly.
-   * The user's main.dart is only imported with a prefix, so framework
-   * type identifiers don't resolve from that scope. Eval comes back with
-   * RPC 113 "Expression compilation error" for every reference.
+   * Eval comes back with RPC 113 "Expression compilation error" for every
+   * framework reference.
    *
    * We can't predict which library will work from outside, so we PROBE:
    * for each candidate library, try compiling the bare identifier
    * `Element`. First one that compiles wins. Cached for the session.
    *
-   * Candidate order (most-likely-to-work first):
-   *   rootLib                          — works on macOS/iOS/Android desktop
-   *   package:flutter/material.dart    — works whenever a Material app
-   *   package:flutter/widgets.dart     — pure-Widgets apps
-   *   package:flutter/cupertino.dart   — Cupertino-only apps
-   *
-   * Compiles+caches in one round-trip on macOS, up to 4 on Web.
+   * Candidate order: rootLib → material → widgets → cupertino.
    */
   async evalTargetLibraryId(): Promise<string> {
     if (this.cachedEvalLibraryId) return this.cachedEvalLibraryId;
@@ -252,22 +245,13 @@ export class FlutterService {
       const lib = iso.libraries?.find((l) => l.uri === uri);
       if (lib?.id) candidates.push({ id: lib.id, uri });
     }
-    // Probe with `Element` — the lowest-common-denominator framework
-    // identifier that every gesture / inspector tool references. If
-    // Element resolves, all our other identifiers (Widget, WidgetsBinding,
-    // *Button, GestureDetector, …) resolve too because they live in the
-    // same library tree.
     const probeErrors: string[] = [];
     for (const cand of candidates) {
       try {
-        // Important: the VM-service `evaluate` RPC does NOT throw on
-        // compilation failures — it returns a regular response of shape
-        // `{ type: "@Error", kind: "error", message: "..." }`. So we
-        // must inspect the response, not rely on try/catch alone. Pre-
-        // v0.6.2 we only had the catch, which meant the first candidate
-        // (typically rootLib) always "won" silently and got cached even
-        // when its scope couldn't resolve `Element` — and every gesture
-        // tool then used the broken target.
+        // The VM-service `evaluate` RPC does NOT throw on compilation
+        // failures — it returns a regular response of shape
+        // `{ type: "@Error", message: "..." }`. We inspect the response,
+        // not just try/catch.
         const r = (await this.client.call("evaluate", {
           isolateId,
           targetId: cand.id,
@@ -305,7 +289,10 @@ export class FlutterService {
 
   async hotReload(): Promise<{ success: boolean; notices: string[] }> {
     const isolateId = await this.mainIsolateId();
-    const report = (await this.client.call("reloadSources", { isolateId, force: false })) as ReloadReportResult;
+    const report = (await this.client.call("reloadSources", {
+      isolateId,
+      force: false,
+    })) as ReloadReportResult;
     // Flutter framework hook to rebuild the widget tree after sources change.
     if (report.success !== false) {
       try {
@@ -321,10 +308,10 @@ export class FlutterService {
   }
 
   /**
-   * Evaluate an expression. The targetId is `package:flutter/material.dart`
-   * by default (or widgets / cupertino / rootLib as fallback chain) so
-   * framework types resolve regardless of the host bootstrap library.
-   * See `evalTargetLibraryId()` for the rationale.
+   * Evaluate an expression against the library picked by
+   * `evalTargetLibraryId()`. Intended for read-only state inspection +
+   * computed checks. For driving UI interactions, use Marionette MCP —
+   * eval-based gestures hit the @visibleForTesting wall.
    */
   async evaluate(
     expression: string,
@@ -338,27 +325,15 @@ export class FlutterService {
     })) as Record<string, unknown>;
     return {
       kind: String(result["type"] ?? result["kind"] ?? ""),
-      valueAsString: typeof result["valueAsString"] === "string" ? (result["valueAsString"] as string) : null,
+      valueAsString:
+        typeof result["valueAsString"] === "string" ? (result["valueAsString"] as string) : null,
       raw: result,
     };
-  }
-
-  async screenshot(): Promise<{ format: string; base64: string }> {
-    const isolateId = await this.mainIsolateId();
-    const result = (await this.client.call("ext.flutter.screenshot", { isolateId })) as {
-      screenshot?: string;
-      type?: string;
-    };
-    if (!result.screenshot) {
-      throw new Error("ext.flutter.screenshot returned no data — is the Flutter framework attached?");
-    }
-    return { format: "png", base64: result.screenshot };
   }
 
   async dispose(): Promise<void> {
     for (const u of this.unsubscribers) u();
     this.unsubscribers = [];
-    if (this._inspector) await this._inspector.dispose();
     await this.client.close();
   }
 }
