@@ -235,6 +235,36 @@ rc_read_screen { session_id: "…", mode: "tail", tail_lines: 30 }
 // → shows the HMR update lines and any compile errors
 ```
 
+## CLI surface (for debugging the server itself, not for daily use)
+
+The `agentic-rc-mcp` binary is primarily an MCP stdio server (no-arg
+default), but it also accepts a few inspection flags. Useful when the
+user is troubleshooting their `.mcp.json` or asks "is it installed and
+which version":
+
+```bash
+agentic-rc-mcp                       # start MCP stdio server (default)
+agentic-rc-mcp --help | -h           # usage + 14-tool list + links
+agentic-rc-mcp --version | -v        # version only ("0.7.1\n")
+agentic-rc-mcp --list-tools          # tab-separated "name<TAB>title" per line
+agentic-rc-mcp --print-server-info   # JSON {name, version, tool_count, tools[]}
+```
+
+Unknown flags exit 1 with a hint. Use these when:
+
+- The user says "I added `.mcp.json` but the agent doesn't see the
+  tools" → run `agentic-rc-mcp --list-tools` to confirm the binary is
+  reachable and lists 14 tools (8 PTY + 6 Flutter).
+- You need to confirm what version is installed before suggesting a
+  workaround that depends on a specific version.
+- You want to pre-validate from a shell script (e.g. a build pipeline)
+  that the MCP is properly wired — `agentic-rc-mcp --version > /dev/null`
+  is a cheap liveness check.
+
+Do **not** use these for normal MCP tool invocations — those go through
+the JSON-RPC stdio transport that Claude Code (or any MCP client)
+handles automatically once `.mcp.json` is in place.
+
 ## Installation reminder (only if the user asks)
 
 ```bash
@@ -250,5 +280,6 @@ Then in the target project's root, drop `.mcp.json`:
 { "mcpServers": { "agentic-rc": { "command": "agentic-rc-mcp" } } }
 ```
 
-… and restart Claude Code. For Flutter UI interaction, add Marionette
-MCP alongside — they're complements, not alternatives.
+… and restart Claude Code. Verify with `agentic-rc-mcp --version` from a
+shell first (should print `0.7.1` or newer). For Flutter UI interaction,
+add Marionette MCP alongside — they're complements, not alternatives.
