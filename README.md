@@ -158,6 +158,23 @@ npm link            # makes `agentic-rc-mcp` available globally
 > chmods it back. If you ever see that error after a clean install,
 > re-run `npm install`.
 
+## CLI
+
+The binary is primarily an MCP stdio server (the no-arg default), but it
+exposes a small CLI surface for inspection and debugging:
+
+```bash
+agentic-rc-mcp                       # start MCP stdio server (default)
+agentic-rc-mcp --help | -h           # usage + tool list + links
+agentic-rc-mcp --version | -v        # version only
+agentic-rc-mcp --list-tools          # tab-separated "name<TAB>title" per line
+agentic-rc-mcp --print-server-info   # JSON {name, version, tool_count, tools[]}
+```
+
+Useful for `.mcp.json` debugging (`--list-tools` confirms what the server
+advertises) and for shell scripting (`--version`, `--print-server-info`).
+Unknown flags exit 1 with a hint.
+
 ## Wire it into Claude Code
 
 Drop `.mcp.json` next to the project you want the agent to drive (or merge

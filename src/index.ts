@@ -30,7 +30,7 @@ import {
 import { flutterEvalHandler, flutterEvalInputSchema } from "./tools/flutter/eval.js";
 
 const SERVER_NAME = "agentic-rc";
-const SERVER_VERSION = "0.7.0";
+const SERVER_VERSION = "0.7.1";
 
 export function buildServer(): McpServer {
   const server = new McpServer(
@@ -217,12 +217,165 @@ export function buildServer(): McpServer {
   return server;
 }
 
-async function main(): Promise<void> {
+// ─── CLI ────────────────────────────────────────────────────────────────
+// The binary is *primarily* an MCP stdio server (the no-arg default), but
+// we expose a small CLI surface for inspection and debugging:
+//
+//   agentic-rc-mcp                  → start MCP stdio server (default)
+//   agentic-rc-mcp --help | -h      → usage + tool list + links
+//   agentic-rc-mcp --version | -v   → version only
+//   agentic-rc-mcp --list-tools     → tool names + titles (for .mcp.json debugging)
+//   agentic-rc-mcp --print-server-info → JSON {name, version, tools[]}
+//
+// Anything else → error + suggest --help. Exit 1.
+
+interface ToolMeta {
+  name: string;
+  title: string;
+  description: string;
+}
+
+/** Walk the registered tools by inspecting the McpServer's internal registry. */
+function listToolsFromServer(server: McpServer): ToolMeta[] {
+  // `_registeredTools` is a private plain object `{ [name]: entry }` in SDK
+  // 1.x (NOT a Map — verified against
+  // node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js).
+  // Defensive narrow so any future SDK shape change just degrades the
+  // listing rather than crashing the CLI.
+  const reg = (server as unknown as {
+    _registeredTools?: Record<string, { title?: string; description?: string }>;
+  })._registeredTools;
+  if (!reg || typeof reg !== "object") return [];
+  const out: ToolMeta[] = [];
+  for (const [name, entry] of Object.entries(reg)) {
+    if (!entry) continue;
+    out.push({
+      name,
+      title: entry.title ?? "",
+      description: entry.description ?? "",
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function printHelp(): void {
+  const server = buildServer();
+  const tools = listToolsFromServer(server);
+  const ptyTools = tools.filter((t) => !t.name.startsWith("rc_flutter_"));
+  const flutterTools = tools.filter((t) => t.name.startsWith("rc_flutter_"));
+
+  const lines: string[] = [];
+  lines.push(`agentic-rc-mcp v${SERVER_VERSION}`);
+  lines.push("");
+  lines.push("Non-invasive remote control + structured observability for");
+  lines.push("long-running interactive local processes (flutter run, npm run dev,");
+  lines.push("REPLs, TUIs). For agentic UI testing of Flutter apps (tap, scroll,");
+  lines.push("text input, screenshots), use Marionette MCP instead:");
+  lines.push("  https://pub.dev/packages/marionette_mcp");
+  lines.push("");
+  lines.push("USAGE");
+  lines.push("  agentic-rc-mcp                   start MCP stdio server (default)");
+  lines.push("  agentic-rc-mcp --help | -h       this message");
+  lines.push("  agentic-rc-mcp --version | -v    version only");
+  lines.push("  agentic-rc-mcp --list-tools      tool names + one-line titles");
+  lines.push("  agentic-rc-mcp --print-server-info");
+  lines.push("                                   JSON {name, version, tools[]}");
+  lines.push("");
+  lines.push(`TOOLS (${tools.length} total — ${ptyTools.length} PTY + ${flutterTools.length} Flutter)`);
+  lines.push("");
+  lines.push("  Generic PTY remote control:");
+  for (const t of ptyTools) {
+    lines.push(`    ${t.name.padEnd(28)} ${t.title}`);
+  }
+  lines.push("");
+  lines.push("  Flutter / Dart-VM observability (non-invasive):");
+  for (const t of flutterTools) {
+    lines.push(`    ${t.name.padEnd(28)} ${t.title}`);
+  }
+  lines.push("");
+  lines.push("WIRE INTO CLAUDE CODE");
+  lines.push('  Drop .mcp.json next to your project root:');
+  lines.push("    { \"mcpServers\": { \"agentic-rc\": { \"command\": \"agentic-rc-mcp\" } } }");
+  lines.push("  Then restart Claude Code. Tools appear as mcp__agentic-rc__rc_*.");
+  lines.push("");
+  lines.push("MORE");
+  lines.push("  README:    https://github.com/moinsen-dev/agentic_rc_cli");
+  lines.push("  CHANGELOG: https://github.com/moinsen-dev/agentic_rc_cli/blob/develop/CHANGELOG.md");
+  lines.push("  Skill:     <repo>/.claude/skills/agentic-rc/SKILL.md");
+
+  process.stdout.write(lines.join("\n") + "\n");
+}
+
+function printVersion(): void {
+  process.stdout.write(`${SERVER_VERSION}\n`);
+}
+
+function printListTools(): void {
+  const tools = listToolsFromServer(buildServer());
+  for (const t of tools) {
+    process.stdout.write(`${t.name}\t${t.title}\n`);
+  }
+}
+
+function printServerInfoJson(): void {
+  const tools = listToolsFromServer(buildServer()).map((t) => ({
+    name: t.name,
+    title: t.title,
+    description: t.description,
+  }));
+  process.stdout.write(
+    JSON.stringify(
+      { name: SERVER_NAME, version: SERVER_VERSION, tool_count: tools.length, tools },
+      null,
+      2,
+    ) + "\n",
+  );
+}
+
+function printUnknownArg(arg: string): void {
+  process.stderr.write(`agentic-rc-mcp: unknown argument: ${arg}\n`);
+  process.stderr.write(`Try: agentic-rc-mcp --help\n`);
+}
+
+async function serve(): Promise<void> {
   const server = buildServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stderr is safe to write to over stdio transport (only stdout carries MCP frames).
   process.stderr.write(`[agentic-rc] MCP server v${SERVER_VERSION} listening on stdio\n`);
+}
+
+/** Dispatch CLI args. Returns the exit code. */
+function dispatchCli(args: string[]): Promise<number> | number {
+  // Accept exactly zero or one mode flag. No positional args, no chained flags.
+  if (args.length === 0) {
+    return serve().then(() => 0);
+  }
+  if (args.length > 1) {
+    process.stderr.write(`agentic-rc-mcp: unexpected extra arguments: ${args.slice(1).join(" ")}\n`);
+    process.stderr.write(`Try: agentic-rc-mcp --help\n`);
+    return 1;
+  }
+  const flag = args[0];
+  switch (flag) {
+    case "--help":
+    case "-h":
+      printHelp();
+      return 0;
+    case "--version":
+    case "-v":
+      printVersion();
+      return 0;
+    case "--list-tools":
+      printListTools();
+      return 0;
+    case "--print-server-info":
+      printServerInfoJson();
+      return 0;
+    default:
+      printUnknownArg(flag);
+      return 1;
+  }
 }
 
 // Run only when invoked as a CLI (not when imported as a library).
@@ -233,8 +386,16 @@ const isDirectRun = (() => {
 })();
 
 if (isDirectRun) {
-  main().catch((err) => {
-    process.stderr.write(`[agentic-rc] fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
-    process.exit(1);
-  });
+  Promise.resolve(dispatchCli(process.argv.slice(2)))
+    .then((code) => {
+      // Don't `process.exit(0)` for the stdio-serve case — the server has
+      // open file descriptors and will exit naturally when stdin closes.
+      // Only exit explicitly for the short-lived CLI modes (non-zero, or
+      // the help/version/list paths).
+      if (code !== 0 || process.argv.length > 2) process.exit(code);
+    })
+    .catch((err) => {
+      process.stderr.write(`[agentic-rc] fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
+      process.exit(1);
+    });
 }
