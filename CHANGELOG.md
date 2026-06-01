@@ -9,6 +9,53 @@ human-readable narrative — especially for the v0.6 → v0.7 pivot.
 
 ---
 
+## [0.7.1] — 2026-05-22 · CLI flags for inspection + debugging
+
+Before this release the `agentic-rc-mcp` binary silently swallowed every
+argument and unconditionally spawned the MCP stdio server — including
+`--help` and `--version`, which gave no feedback at all and left the
+process hanging on stdin. Real CLI now:
+
+```
+agentic-rc-mcp                       MCP stdio server (default, unchanged)
+agentic-rc-mcp --help | -h           usage + 14-tool list + links
+agentic-rc-mcp --version | -v        version only ("0.7.1\n")
+agentic-rc-mcp --list-tools          name<TAB>title per registered tool
+agentic-rc-mcp --print-server-info   JSON {name, version, tool_count, tools[]}
+```
+
+Unknown flag → stderr + exit 1. Stdio-server mode (no args) is byte-for-byte
+unchanged.
+
+### Why
+
+- `.mcp.json` debugging: `--list-tools` confirms the binary is reachable
+  and advertises the 14 expected tools (8 PTY + 6 Flutter).
+- Pipeline liveness check: `agentic-rc-mcp --version > /dev/null` is the
+  cheapest possible "is the MCP wired up correctly" test.
+- Discoverability: `--help` actually documents the tool surface and points
+  at Marionette MCP for the cases this MCP deliberately doesn't cover.
+
+### Notes
+
+- SDK shape gotcha captured in code: `McpServer._registeredTools` is a
+  plain `{ [name]: entry }` object, **not** a `Map`. Initial
+  implementation tried `.forEach()` and silently listed zero tools; fix
+  uses `Object.entries(reg)`. Verified against
+  `node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js`.
+- SKILL.md (project-local + global) gained a "CLI surface" section with
+  the three concrete agent use-cases for each flag.
+
+### Files
+
+- `src/index.ts` — new `dispatchCli()` + `listToolsFromServer()` +
+  `printHelp/Version/ListTools/ServerInfoJson()`.
+- `README.md` — new `## CLI` section right after Install.
+- `.claude/skills/agentic-rc/SKILL.md` + `~/.claude/skills/agentic-rc/SKILL.md` —
+  CLI surface documented for the agent.
+
+---
+
 ## [0.7.0] — 2026-05-22 · **Pivot to non-invasive RC + observability**
 
 After empirically comparing v0.6.2 against
