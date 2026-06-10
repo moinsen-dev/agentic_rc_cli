@@ -143,6 +143,18 @@ terminal, and the MCP server takes it from there.
 
 Requires Node ≥ 20.
 
+### Option A: Homebrew (recommended)
+
+```bash
+brew tap moinsen-dev/tap
+brew install agentic-rc-mcp
+```
+
+The Homebrew formula handles Node.js dependency, npm install, TypeScript build,
+and PATH setup automatically.
+
+### Option B: From source
+
 ```bash
 git clone <this-repo>
 cd agentic_rc_cli
